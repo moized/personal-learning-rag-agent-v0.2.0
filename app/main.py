@@ -1,5 +1,6 @@
 import json
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl, Field
 from sqlalchemy import select
 from .config import settings
@@ -13,7 +14,18 @@ from .services.study import answer
 from .services.curriculum import build_syllabus, build_study_pack_prompt
 from .services.ingestion import parse_structured_literal, clean_caption_text
 
-app = FastAPI(title=settings.app_name)
+app = FastAPI(title=settings.app_name, version="0.3.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        *[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 worker: Worker | None = None
 
 
@@ -71,6 +83,7 @@ def health():
         "fast_model": settings.gemini_fast_model,
         "embedding_model": settings.gemini_embedding_model,
         "retrieval": "dense + BM25 + RRF + optional LLM rerank",
+        "version": "0.3.0",
     }
 
 
@@ -219,6 +232,29 @@ def add_youtube(url: HttpUrl, name: str | None = None, course_id: int | None = N
                                   domain_hint=domain_hint, topic_hint=topic_hint, description=description,
                                   metadata_json=metadata_json, uri=str(url))
         return {"source_id": src.id, "job_id": job.id, "status": "queued"}
+
+
+@app.get("/sources")
+def sources(course_id: int | None = None):
+    with session_scope() as db:
+        stmt = select(Source).order_by(Source.id.desc())
+        if course_id is not None:
+            stmt = stmt.where(Source.course_id == course_id)
+        rows = db.execute(stmt).scalars().all()
+        return [
+            {
+                "id": s.id,
+                "name": s.name,
+                "source_type": s.source_type,
+                "course_id": s.course_id,
+                "status": s.status,
+                "topic_hint": s.topic_hint,
+                "domain_hint": s.domain_hint,
+                "description": s.description,
+                "profile": json.loads(s.profile_json) if s.profile_json else None,
+            }
+            for s in rows
+        ]
 
 
 @app.get("/jobs")
