@@ -1,16 +1,9 @@
 # LearnOS Web
 
-Modern Next.js frontend for Personal Learning Knowledge Agent v0.3.
+Vite + React + TypeScript client for the Personal Learning Knowledge Agent.
 
-## UX
-Overview → Library → Processing → Study.
+The UI is source-first: add one item now and another later. Files, pasted transcripts/text, and YouTube are separate supported inputs. Multiple files are supported but never required. Metadata is optional.
 
-The Add Material flow supports files, pasted transcripts, Python-dict/JSON content, and YouTube. Advanced metadata stays collapsed. Background processing is visible but not exposed as technical controls.
+Install Node.js 20+, then run npm install and npm run dev. The backend defaults to http://localhost:8000; set VITE_API_URL to change it.
 
-## Run
-npm install
-npm run dev
-
-Set NEXT_PUBLIC_API_URL when FastAPI is not at http://localhost:8000.
-
-Stack: Next.js App Router, TypeScript, Tailwind v4, shadcn/ui conventions with Base UI, Lucide.
+The visual system follows the current shadcn/ui Base/Nova conventions while keeping the dependency surface small.
