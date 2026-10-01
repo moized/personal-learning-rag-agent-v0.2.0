@@ -1,20 +1,15 @@
-# Personal Learning Knowledge Agent v0.2.0
+# Personal Learning Knowledge Agent v0.3.0
 
 A self-organizing RAG + curriculum system for studying from lectures, transcripts, PDFs, books and other learning sources.
 
-## What is new in v0.2
+## What is in v0.3
 
-- Gemini 3.8 Flash for reasoning/synthesis with Gemini 3.5 Flash-Lite for high-volume background work and fallback.
-- Manual transcript, SRT/VTT, Python-dict and JSON paste support.
-- Optional source metadata: domain, topic, description and arbitrary JSON/Python-dict metadata.
-- Structure-aware chunking and context-enriched indexing.
-- Batched embeddings with `gemini-embedding-2`.
-- Semantic groups with centroid routing and LLM validation only when ambiguous.
-- Group-level concept extraction instead of one LLM call per chunk.
-- Hybrid retrieval: dense + BM25 + RRF + Gemini 3.5 Flash-Lite reranking.
-- Context-window expansion for lecture/transcript continuity.
-- Persistent jobs, checkpoints, retries and crash-safe resume.
-- Course syllabus generation and copy-paste-ready study packs.
+- Persistent source/job workflow with checkpoints and resume.
+- PDF, DOCX, TXT/Markdown, SRT/VTT, pasted transcript, Python dictionary/JSON and YouTube ingestion.
+- Context-aware chunking, batched Gemini embeddings, semantic grouping and group-level concepts.
+- Hybrid dense + BM25 + RRF + LLM reranking with local context expansion.
+- Course-level syllabus generation and copy-paste study packs.
+- Lightweight Vite/React learning workspace for incremental source addition.
 
 ## Run
 
