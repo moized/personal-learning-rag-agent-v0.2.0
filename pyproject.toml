@@ -1,0 +1,8 @@
+[project]
+name = "personal-learning-rag-agent"
+version = "0.1.0"
+description = "Persistent self-organizing RAG learning agent"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

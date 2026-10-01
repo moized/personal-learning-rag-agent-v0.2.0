@@ -1,0 +1,11 @@
+{
+  "name": "Lecture 1 — Hybrid Retrieval",
+  "course": "RAG Engineering",
+  "domain": "AI / Information Retrieval",
+  "topic": "Hybrid Retrieval",
+  "description": "Lecture about combining lexical and dense retrieval.",
+  "topics": ["BM25", "dense retrieval", "hybrid search"],
+  "lecturer": "Example Lecturer",
+  "week": 1,
+  "transcript": "Paste any manually obtained transcript here. It does not need to come from YouTube."
+}
