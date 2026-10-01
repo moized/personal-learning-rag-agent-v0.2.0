@@ -52,7 +52,7 @@ export default function App(){
     </aside>
     <main className="main">
       <header className="top">
-        <div><div className="eyebrow">{course?.domain||"Personal learning"}</div><strong>{course?.name||"All sources"}</strong></div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}><select className="select" style={{width:"auto",minWidth:180,padding:"7px 10px"}} value={courseId||""} onChange={e=>setCourseId(e.target.value?Number(e.target.value):undefined)}><option value="">All sources</option>{courses.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><button className="btn ghost" title="New course" onClick={createCourse}><Plus size={14}/></button></div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           {active.length>0&&<Badge><LoaderCircle size={11}/>{active.length} running</Badge>}
           <button className="btn outline" onClick={refresh}><RefreshCw size={14}/></button>
