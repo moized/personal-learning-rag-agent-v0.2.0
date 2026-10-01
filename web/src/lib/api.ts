@@ -9,6 +9,7 @@ async function req<T>(path:string,init?:RequestInit):Promise<T>{
  return r.json()
 }
 export const api={
+  createCourse:(data:{name:string;domain?:string;description?:string})=>req("/courses",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)}),
  health:()=>req<any>("/health"),
  courses:()=>req<Course[]>("/courses"),
  sources:(courseId?:number)=>req<Source[]>(courseId?"/sources?course_id="+courseId:"/sources"),
