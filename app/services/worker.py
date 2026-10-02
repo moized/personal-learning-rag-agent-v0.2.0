@@ -415,6 +415,9 @@ Chunk:
 
         for i, group_id in enumerate(group_ids, 1):
             with session_scope() as db:
+                graph_job = db.get(Job, job_id)
+                if graph_job:
+                    graph_job.stage = "graph"
                 job = db.get(Job, job_id)
                 group = db.get(Group, group_id)
                 if group:
