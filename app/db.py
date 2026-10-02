@@ -37,6 +37,7 @@ def _migrate_sqlite() -> None:
     _add_missing_columns("documents", {"summary": "summary TEXT"})
     _add_missing_columns("chunks", {
         "parent_chunk_id": "parent_chunk_id INTEGER",
+        "chunk_kind": "chunk_kind VARCHAR(20) DEFAULT 'leaf'",
         "contextual_text": "contextual_text TEXT",
         "token_estimate": "token_estimate INTEGER DEFAULT 0",
         "group_confidence": "group_confidence FLOAT",
