@@ -164,6 +164,31 @@ def prerequisite_evidence_chunks(
     return out
 
 
+def _would_create_prerequisite_cycle(
+    db: Session,
+    prerequisite_id: int,
+    dependent_id: int,
+) -> bool:
+    """Reject an edge when the dependent already reaches the proposed prerequisite."""
+    queue = deque([dependent_id])
+    visited = {dependent_id}
+    while queue:
+        current = queue.popleft()
+        if current == prerequisite_id:
+            return True
+        relations = db.execute(
+            select(ConceptRelation).where(
+                ConceptRelation.from_concept_id == current,
+                ConceptRelation.relation_type == "prerequisite",
+            )
+        ).scalars().all()
+        for relation in relations:
+            if relation.to_concept_id not in visited:
+                visited.add(relation.to_concept_id)
+                queue.append(relation.to_concept_id)
+    return False
+
+
 def extract_group_relations(db: Session, ai: AIProvider, group_id: int) -> int:
     concepts = db.execute(
         select(Concept).where(Concept.group_id == group_id).order_by(Concept.canonical_name)
@@ -230,6 +255,11 @@ Return JSON with a relationships array. Each relationship must use:
             continue
         confidence = max(0.0, min(1.0, float(item.get("confidence", 0.0))))
         if confidence < settings.relationship_min_confidence:
+            continue
+
+        if rel_type == "prerequisite" and _would_create_prerequisite_cycle(
+            db, prerequisite_id=source.id, dependent_id=target.id
+        ):
             continue
 
         exists = db.execute(
