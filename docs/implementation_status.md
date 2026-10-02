@@ -1,25 +1,40 @@
-# Implementation status — v0.3.0
+# Implementation status — v0.4.0
 
-## Verified locally in development
+## Implemented
 
 - Persistent SQLite source/job/chunk state.
-- Multiple independent sources can be queued without waiting for earlier sources.
-- Running/retry jobs are reclaimable after restart.
-- Completed chunk work is not recomputed.
+- Incremental source ingestion with independent jobs.
+- Crash/retry recovery and compare-and-set queue claiming.
 - PDF/TXT/MD/DOCX/SRT/VTT/manual transcript ingestion.
-- Python-dict/JSON paste is parsed safely with ast.literal_eval fallback.
-- YouTube video and playlist ingestion path with video-level progress.
-- Optional source metadata and source profiling.
-- Batched embeddings and hybrid dense + BM25 + RRF retrieval.
-- Optional Gemini LLM reranking and source-grounded synthesis.
-- Course syllabus generation and copy-paste study packs.
-- Vite + React frontend with incremental Add workflow and automatic queue polling.
+- Safe JSON/Python-dict parsing with ast.literal_eval fallback.
+- YouTube video and playlist ingestion with video-level checkpoints.
+- Hierarchical parent/leaf chunk windows and deterministic next-chunk relations.
+- Context-enriched embeddings, semantic grouping and group-level concept extraction.
+- Concept relationship extraction for prerequisite, related and contradiction edges.
+- Adaptive multi-query dense + BM25 retrieval with one RRF fusion and one optional LLM rerank.
+- Prerequisite graph traversal can inject supporting evidence before reranking.
+- Parent/neighbor context expansion after reranking.
+- Low-coverage global fallback.
+- Study-run trace persistence and inspection endpoint.
+- Course knowledge-graph endpoint.
+- Syllabus generation, study packs and Vite/React incremental source UI.
+- Initial retrieval evaluation helpers and 20–50-question eval format.
 
-## Known production-hardening work
+## Intentionally not the default yet
 
-- Qdrant is still a planned scale backend rather than the default local backend.
-- Queue claiming is intended for one local worker; multi-worker atomic claiming is a later step.
-- Arbitrary local video-file speech-to-text is not yet built in.
-- Concept deduplication and syllabus quality need a real evaluation set before trusting large corpora.
-- Web freshness/research agent is a later layer.
-- The agent is a durable workflow controller, not self-modifying code.
+- Qdrant / sparse ANN infrastructure.
+- Dedicated late-interaction reranker.
+- Full learner mastery model.
+- Web research worker.
+- Multimodal media indexing.
+- Multi-worker work-item leases.
+
+These are staged behind measurements rather than added solely for architectural fashion.
+
+## Validation note
+
+The environment used to edit the repository cannot reliably clone GitHub over outbound DNS, so local execution of the full application has not been claimed from this environment. GitHub Actions remains the authoritative CI path for the branch.
+
+## Design direction
+
+The durable system assets are knowledge, evidence, graph, state and evaluation. The model provider is replaceable.
