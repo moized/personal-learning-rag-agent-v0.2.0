@@ -1,10 +1,10 @@
 import json
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel, HttpUrl, Field
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from .config import settings
 from .db import init_db, session_scope
-from .models import Source, Job, Group, Course, Chunk, Document
+from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace
 from .services.files import save_upload, save_text_content
 from .services.queue import enqueue
 from .services.worker import Worker
@@ -70,7 +70,10 @@ def health():
         "reasoning_model": settings.gemini_reasoning_model,
         "fast_model": settings.gemini_fast_model,
         "embedding_model": settings.gemini_embedding_model,
-        "retrieval": "dense + BM25 + RRF + optional LLM rerank",
+        "retrieval": (
+            "adaptive multi-query dense + BM25 + RRF + prerequisite graph + optional LLM rerank "
+            "+ parent/neighbor context"
+        ),
     }
 
 
@@ -89,8 +92,10 @@ def create_course(req: CourseRequest):
 @app.get("/courses")
 def courses():
     with session_scope() as db:
-        return [{"id": c.id, "name": c.name, "description": c.description, "domain": c.domain, "outline": c.outline}
-                for c in db.execute(select(Course).order_by(Course.name)).scalars().all()]
+        return [
+            {"id": c.id, "name": c.name, "description": c.description, "domain": c.domain, "outline": c.outline}
+            for c in db.execute(select(Course).order_by(Course.name)).scalars().all()
+        ]
 
 
 def _metadata_fields(metadata: dict | None, domain_hint: str | None, topic_hint: str | None, description: str | None):
@@ -105,9 +110,19 @@ def _metadata_fields(metadata: dict | None, domain_hint: str | None, topic_hint:
 
 
 def _create_source(db, *, name, source_type, course_id, domain_hint, topic_hint, description, metadata_json, uri=None, local_path=None, content_hash=None):
-    src = Source(name=name, source_type=source_type, uri=uri, local_path=local_path, course_id=course_id,
-                 domain_hint=domain_hint, topic_hint=topic_hint, description=description,
-                 metadata_json=metadata_json, content_hash=content_hash, status="queued")
+    src = Source(
+        name=name,
+        source_type=source_type,
+        uri=uri,
+        local_path=local_path,
+        course_id=course_id,
+        domain_hint=domain_hint,
+        topic_hint=topic_hint,
+        description=description,
+        metadata_json=metadata_json,
+        content_hash=content_hash,
+        status="queued",
+    )
     db.add(src)
     db.flush()
     job = enqueue(db, src.id)
@@ -131,10 +146,12 @@ def upload_source(
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
             return {"source_id": existing.id, "job_id": None, "deduplicated": True}
-        src, job = _create_source(db, name=file.filename, source_type="file", course_id=course_id,
-                                  domain_hint=domain_hint, topic_hint=topic_hint, description=description,
-                                  metadata_json=json.dumps(metadata, ensure_ascii=False) if metadata else metadata_json,
-                                  local_path=str(path), content_hash=digest)
+        src, job = _create_source(
+            db, name=file.filename, source_type="file", course_id=course_id,
+            domain_hint=domain_hint, topic_hint=topic_hint, description=description,
+            metadata_json=json.dumps(metadata, ensure_ascii=False) if metadata else metadata_json,
+            local_path=str(path), content_hash=digest,
+        )
         return {"source_id": src.id, "job_id": job.id, "status": "queued"}
 
 
@@ -165,10 +182,12 @@ def add_manual_source(
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
             return {"source_id": existing.id, "job_id": None, "deduplicated": True}
-        src, job = _create_source(db, name=name, source_type="transcript", course_id=course_id,
-                                  domain_hint=domain_hint, topic_hint=topic_hint, description=description,
-                                  metadata_json=json.dumps(metadata, ensure_ascii=False) if metadata else None,
-                                  local_path=str(path), content_hash=digest)
+        src, job = _create_source(
+            db, name=name, source_type="transcript", course_id=course_id,
+            domain_hint=domain_hint, topic_hint=topic_hint, description=description,
+            metadata_json=json.dumps(metadata, ensure_ascii=False) if metadata else None,
+            local_path=str(path), content_hash=digest,
+        )
         return {"source_id": src.id, "job_id": job.id, "status": "queued", "parsed_format": input_format}
 
 
@@ -185,10 +204,12 @@ def add_manual_transcript(name: str = Form(...), transcript: str = Form(...), co
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
             return {"source_id": existing.id, "job_id": None, "deduplicated": True}
-        src, job = _create_source(db, name=name, source_type="transcript", course_id=course_id,
-                                  domain_hint=domain_hint, topic_hint=topic_hint, description=description,
-                                  metadata_json=json.dumps(metadata, ensure_ascii=False) if metadata else None,
-                                  local_path=str(path), content_hash=digest)
+        src, job = _create_source(
+            db, name=name, source_type="transcript", course_id=course_id,
+            domain_hint=domain_hint, topic_hint=topic_hint, description=description,
+            metadata_json=json.dumps(metadata, ensure_ascii=False) if metadata else None,
+            local_path=str(path), content_hash=digest,
+        )
         return {"source_id": src.id, "job_id": job.id, "status": "queued"}
 
 
@@ -204,9 +225,11 @@ def add_structured_source(req: StructuredSourceRequest):
             return {"source_id": existing.id, "job_id": None, "deduplicated": True}
         metadata_json = json.dumps(req.metadata, ensure_ascii=False) if req.metadata else None
         domain_hint, topic_hint, description = _metadata_fields(req.metadata, req.domain_hint, req.topic_hint, req.description)
-        src, job = _create_source(db, name=req.name, source_type="transcript", course_id=req.course_id,
-                                  domain_hint=domain_hint, topic_hint=topic_hint, description=description,
-                                  metadata_json=metadata_json, local_path=str(path), content_hash=digest)
+        src, job = _create_source(
+            db, name=req.name, source_type="transcript", course_id=req.course_id,
+            domain_hint=domain_hint, topic_hint=topic_hint, description=description,
+            metadata_json=metadata_json, local_path=str(path), content_hash=digest,
+        )
         return {"source_id": src.id, "job_id": job.id, "status": "queued"}
 
 
@@ -215,9 +238,11 @@ def add_youtube(url: HttpUrl, name: str | None = None, course_id: int | None = N
                 domain_hint: str | None = None, topic_hint: str | None = None, description: str | None = None,
                 metadata_json: str | None = None):
     with session_scope() as db:
-        src, job = _create_source(db, name=name or str(url), source_type="youtube", course_id=course_id,
-                                  domain_hint=domain_hint, topic_hint=topic_hint, description=description,
-                                  metadata_json=metadata_json, uri=str(url))
+        src, job = _create_source(
+            db, name=name or str(url), source_type="youtube", course_id=course_id,
+            domain_hint=domain_hint, topic_hint=topic_hint, description=description,
+            metadata_json=metadata_json, uri=str(url),
+        )
         return {"source_id": src.id, "job_id": job.id, "status": "queued"}
 
 
@@ -226,16 +251,101 @@ def jobs():
     with session_scope() as db:
         rows = db.execute(select(Job).order_by(Job.id.desc())).scalars().all()
         sources = {s.id: s for s in db.execute(select(Source)).scalars().all()}
-        return [{"id": j.id, "source_id": j.source_id, "source_name": sources.get(j.source_id).name if sources.get(j.source_id) else None,
-                 "course_id": sources.get(j.source_id).course_id if sources.get(j.source_id) else None,
-                 "status": j.status, "stage": j.stage, "progress": f"{j.progress_current}/{j.progress_total}",
-                 "checkpoint": j.checkpoint, "plan": json.loads(j.plan_json) if j.plan_json else None, "error": j.error} for j in rows]
+        return [
+            {
+                "id": j.id,
+                "source_id": j.source_id,
+                "source_name": sources.get(j.source_id).name if sources.get(j.source_id) else None,
+                "course_id": sources.get(j.source_id).course_id if sources.get(j.source_id) else None,
+                "status": j.status,
+                "stage": j.stage,
+                "progress": f"{j.progress_current}/{j.progress_total}",
+                "checkpoint": j.checkpoint,
+                "plan": json.loads(j.plan_json) if j.plan_json else None,
+                "error": j.error,
+            }
+            for j in rows
+        ]
 
 
 @app.get("/groups")
 def groups():
     with session_scope() as db:
-        return [{"id": g.id, "name": g.name, "description": g.description} for g in db.execute(select(Group).order_by(Group.name)).scalars().all()]
+        return [
+            {"id": g.id, "name": g.name, "description": g.description}
+            for g in db.execute(select(Group).order_by(Group.name)).scalars().all()
+        ]
+
+
+@app.get("/courses/{course_id}/knowledge-graph")
+def knowledge_graph(course_id: int):
+    with session_scope() as db:
+        concept_ids = {
+            row[0]
+            for row in db.execute(
+                select(Evidence.concept_id)
+                .join(Chunk, Evidence.chunk_id == Chunk.id)
+                .join(Document, Chunk.document_id == Document.id)
+                .join(Source, Document.source_id == Source.id)
+                .where(Source.course_id == course_id)
+            ).all()
+        }
+        if not concept_ids:
+            return {"course_id": course_id, "concepts": [], "relations": []}
+
+        concepts = db.execute(
+            select(Concept).where(Concept.id.in_(concept_ids)).order_by(Concept.canonical_name)
+        ).scalars().all()
+        relations = db.execute(
+            select(ConceptRelation).where(
+                ConceptRelation.from_concept_id.in_(concept_ids),
+                ConceptRelation.to_concept_id.in_(concept_ids),
+            ).order_by(ConceptRelation.id)
+        ).scalars().all()
+        return {
+            "course_id": course_id,
+            "concepts": [
+                {
+                    "id": c.id,
+                    "name": c.canonical_name,
+                    "description": c.description,
+                    "aliases": json.loads(c.aliases_json or "[]"),
+                }
+                for c in concepts
+            ],
+            "relations": [
+                {
+                    "from_concept_id": r.from_concept_id,
+                    "to_concept_id": r.to_concept_id,
+                    "type": r.relation_type,
+                    "confidence": r.confidence,
+                }
+                for r in relations
+            ],
+        }
+
+
+@app.get("/traces/{run_id}")
+def traces(run_id: str):
+    with session_scope() as db:
+        return [
+            {
+                "id": t.id,
+                "run_id": t.run_id,
+                "event_type": t.event_type,
+                "task": t.task,
+                "model": t.model,
+                "status": t.status,
+                "latency_ms": t.latency_ms,
+                "payload": json.loads(t.payload_json) if t.payload_json else None,
+                "result": json.loads(t.result_json) if t.result_json else None,
+                "error": t.error,
+                "created_at": t.created_at.isoformat(),
+            }
+            for t in db.execute(
+                select(AgentTrace).where(AgentTrace.run_id == run_id).order_by(AgentTrace.id)
+            ).scalars().all()
+        ]
 
 
 @app.post("/study")
@@ -262,15 +372,43 @@ def course_stats(course_id: int):
     with session_scope() as db:
         sources = db.execute(select(Source).where(Source.course_id == course_id)).scalars().all()
         source_ids = {s.id for s in sources}
-        docs = db.execute(select(Document).where(Document.source_id.in_(source_ids) if source_ids else False)).scalars().all()
+        docs = db.execute(
+            select(Document).where(Document.source_id.in_(source_ids) if source_ids else False)
+        ).scalars().all()
         doc_ids = {d.id for d in docs}
-        chunks = db.execute(select(Chunk).where(Chunk.document_id.in_(doc_ids) if doc_ids else False)).scalars().all()
+        chunks = db.execute(
+            select(Chunk).where(Document.id.in_(doc_ids)).join(Document, Chunk.document_id == Document.id)
+            if doc_ids
+            else select(Chunk).where(False)
+        ).scalars().all()
+        leaf_chunks = [c for c in chunks if c.chunk_kind == "leaf"]
+        parent_chunks = [c for c in chunks if c.chunk_kind == "parent"]
+        concept_ids = {
+            row[0]
+            for row in db.execute(
+                select(Evidence.concept_id)
+                .join(Chunk, Evidence.chunk_id == Chunk.id)
+                .join(Document, Chunk.document_id == Document.id)
+                .join(Source, Document.source_id == Source.id)
+                .where(Source.course_id == course_id)
+            ).all()
+        }
+        relation_count = db.execute(
+            select(ConceptRelation.id)
+            .where(
+                ConceptRelation.from_concept_id.in_(concept_ids),
+                ConceptRelation.to_concept_id.in_(concept_ids),
+            )
+        ).scalars().all() if concept_ids else []
         return {
             "course_id": course_id,
             "sources": len(sources),
             "documents": len(docs),
-            "chunks": len(chunks),
-            "embedded": sum(c.embedding_status == "done" for c in chunks),
-            "grouped": sum(c.classification_status == "done" for c in chunks),
-            "concept_indexed": sum(c.cluster_status == "done" for c in chunks),
+            "chunks": len(leaf_chunks),
+            "parent_chunks": len(parent_chunks),
+            "embedded": sum(c.embedding_status == "done" for c in leaf_chunks),
+            "grouped": sum(c.classification_status == "done" for c in leaf_chunks),
+            "concept_indexed": sum(c.cluster_status == "done" for c in leaf_chunks),
+            "concepts": len(concept_ids),
+            "concept_relations": len(relation_count),
         }
