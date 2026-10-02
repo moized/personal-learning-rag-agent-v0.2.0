@@ -120,6 +120,7 @@ def answer(
         course_id=course_id,
         target_concepts=query_plan["target_concepts"],
         prerequisite_depth=query_plan["prerequisite_depth"] if query_plan["needs_prerequisites"] else 0,
+        rerank_question=question,
     )
 
     # A low-coverage result can escape routing restrictions once, preventing a bad group
@@ -134,6 +135,7 @@ def answer(
             course_id=course_id,
             target_concepts=query_plan["target_concepts"],
             prerequisite_depth=query_plan["prerequisite_depth"] if query_plan["needs_prerequisites"] else 0,
+            rerank_question=question,
         )
         seen = {c.id for c, _ in primary}
         primary.extend((c, s) for c, s in fallback if c.id not in seen)
@@ -159,6 +161,7 @@ Answer only from the supplied evidence.
 Distinguish direct evidence from synthesis, and explicitly say when the evidence is insufficient.
 Use concise citations like [chunk:123] next to factual claims when possible.
 When prerequisite evidence is present, use it only to explain dependencies needed for the target topic.
+When source comparison is requested, distinguish differences between sources rather than merging them silently.
 Question: {question}
 Evidence:
 {context}
