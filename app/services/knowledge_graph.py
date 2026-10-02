@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import deque
 
 from sqlalchemy import select
@@ -46,7 +47,7 @@ def add_sequence_relations(db: Session, document_id: int) -> int:
 def resolve_concepts(db: Session, names: list[str]) -> list[Concept]:
     if not names:
         return []
-    normalized = {str(n).strip().lower() for n in names if str(n).strip()}
+    normalized = {re.sub(r"\\s+", " ", str(n).strip().lower()) for n in names if str(n).strip()}
     concepts = db.execute(select(Concept)).scalars().all()
     matched: list[Concept] = []
     for concept in concepts:
@@ -57,14 +58,10 @@ def resolve_concepts(db: Session, names: list[str]) -> list[Concept]:
                 candidates.extend(str(a) for a in aliases)
         except json.JSONDecodeError:
             pass
-        candidate_norm = {c.strip().lower() for c in candidates if c and c.strip()}
+        candidate_norm = {re.sub(r"\\s+", " ", c.strip().lower()) for c in candidates if c and c.strip()}
         if candidate_norm & normalized:
             matched.append(concept)
             continue
-        for requested in normalized:
-            if any(requested in c or c in requested for c in candidate_norm if c):
-                matched.append(concept)
-                break
     return matched
 
 
