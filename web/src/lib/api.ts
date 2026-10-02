@@ -39,5 +39,5 @@ export const api={
  },
  syllabus:(id?:number)=>req<{syllabus:string}>("/syllabus"+(id?"?course_id="+id:"")),
  studyPack:(topic:string,id?:number)=>req<any>("/study-pack",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,course_id:id||null,top_k:12})}),
- study:(question:string,id?:number)=>req<any>("/study",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question,course_id:id||null,top_k:8}))
+ study:(question:string,id?:number)=>req<any>("/study",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question,course_id:id||null,top_k:8})})
 }
