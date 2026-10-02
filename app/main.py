@@ -1,5 +1,6 @@
 import json
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl, Field
 from sqlalchemy import select, or_
 from .config import settings
@@ -14,6 +15,13 @@ from .services.curriculum import build_syllabus, build_study_pack_prompt
 from .services.ingestion import parse_structured_literal, clean_caption_text
 
 app = FastAPI(title=settings.app_name)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 worker: Worker | None = None
 
 
@@ -82,11 +90,11 @@ def create_course(req: CourseRequest):
     with session_scope() as db:
         existing = db.execute(select(Course).where(Course.name == req.name)).scalar_one_or_none()
         if existing:
-            return {"course_id": existing.id, "deduplicated": True}
+            return {"id": existing.id, "name": existing.name, "deduplicated": True}
         course = Course(name=req.name, description=req.description, domain=req.domain, outline=req.outline)
         db.add(course)
         db.flush()
-        return {"course_id": course.id, "name": course.name}
+        return {"id": course.id, "name": course.name}
 
 
 @app.get("/courses")
@@ -95,6 +103,27 @@ def courses():
         return [
             {"id": c.id, "name": c.name, "description": c.description, "domain": c.domain, "outline": c.outline}
             for c in db.execute(select(Course).order_by(Course.name)).scalars().all()
+        ]
+
+
+@app.get("/sources")
+def sources(course_id: int | None = None):
+    with session_scope() as db:
+        query = select(Source).order_by(Source.created_at.desc())
+        if course_id is not None:
+            query = query.where(Source.course_id == course_id)
+        return [
+            {
+                "id": source.id,
+                "name": source.name,
+                "source_type": source.source_type,
+                "course_id": source.course_id,
+                "status": source.status,
+                "topic_hint": source.topic_hint,
+                "domain_hint": source.domain_hint,
+                "description": source.description,
+            }
+            for source in db.execute(query).scalars().all()
         ]
 
 

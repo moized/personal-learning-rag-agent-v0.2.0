@@ -22,6 +22,16 @@ export default function App(){
   const[health,setHealth]=useState<any>()
   const[add,setAdd]=useState(false)
   const[error,setError]=useState("")
+  const createCourse=async()=>{
+    const name=window.prompt("Course name")?.trim()
+    if(!name)return
+    try{
+      setError("")
+      const created=await api.createCourse({name})
+      setCourses(prev=>[...prev,created])
+      setCourseId(created.id)
+    }catch(e){setError(e instanceof Error?e.message:"Could not create course")}
+  }
   const refresh=async()=>{
     try{
       setError("")
@@ -48,7 +58,7 @@ export default function App(){
     <aside className="rail">
       <div className="brand"><div className="mark"><Sparkles size={15}/></div><span>LearnOS</span></div>
       <div className="nav">{nav.map(([id,label,Icon])=><button key={id} className={view===id?"active":""} onClick={()=>setView(id)}><Icon size={17}/><span>{label}</span></button>)}</div>
-      <div className="rail-foot"><Button onClick={()=>setAdd(true)}><Plus size={16}/><span>Add</span></Button><small className="muted" style={{padding:"0 9px"}}>{health?.llm?"AI connected":"Local fallback"}</small></div>
+      <div className="rail-foot"><Button onClick={()=>setAdd(true)}><Plus size={16}/><span>Add</span></Button><small className="muted" style={{padding:"0 9px"}}>{health?.llm?"AI configured":"Local fallback"}</small></div>
     </aside>
     <main className="main">
       <header className="top">
@@ -71,6 +81,7 @@ export default function App(){
 
 function Home({stats,sources,jobs,add,study}:{stats:Stats|null;sources:Source[];jobs:Job[];add:()=>void;study:()=>void}){
   const current=jobs.find(j=>j.status==="running")||jobs.find(j=>j.status==="queued")
+  const failed=jobs.filter(j=>j.status==="failed").slice(0,3)
   return <>
     <div className="hero">
       <section className="card hero-card">
@@ -87,6 +98,7 @@ function Home({stats,sources,jobs,add,study}:{stats:Stats|null;sources:Source[];
     <div className="stats">
       {[["Sources",stats?.sources??sources.length],["Documents",stats?.documents??"-"],["Chunks",stats?.chunks??"-"],["Groups",stats?.grouped??"-"]].map(([a,b])=><div className="card stat" key={String(a)}><strong>{String(b)}</strong><span>{String(a)}</span></div>)}
     </div>
+      {failed.length>0&&<section className="card panel" style={{marginTop:16}}><div className="eyebrow">Needs attention</div><h2 style={{marginTop:7}}>Processing failed</h2>{failed.map(job=><div key={job.id} style={{marginTop:12}}><strong>{job.source_name||"Source"}</strong><div className="muted" style={{fontSize:11,marginTop:4}}>{job.stage} · {job.error||"Unknown processing error"}</div></div>)}</section>}
   </>
 }
 
