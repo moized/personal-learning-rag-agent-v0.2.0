@@ -1,124 +1,312 @@
-# Personal Learning Knowledge Agent — System Design v0.2
+# Personal Learning Knowledge System — System Design v0.4
 
 ## Vision
 
-A persistent personal learning system that turns heterogeneous learning sources into an organized knowledge base, then turns that knowledge into a course syllabus and evidence-grounded study material.
+LearnOS is a persistent personal learning system built to stay useful as frontier models improve. Models provide reasoning and language generation; the durable value of the system lives in its knowledge graph, evidence, learner state, retrieval engine, workflow state and evaluation suite.
 
-This is not a basic `vector DB + chatbot` design. The v0.2 retrieval architecture is:
+The system is intentionally not a "vector database + chatbot".
 
-```text
-context-enriched chunks
-      ↓
-Gemini Embedding 2
-      ↓
-semantic groups
-      ↓
-course-aware query routing
-      ↓
-Dense retrieval + BM25
-      ↓
-RRF fusion
-      ↓
-Gemini 3.5 Flash-Lite reranking
-      ↓
-context-window expansion
-      ↓
-Gemini 3.8 Flash synthesis
-```
+## System shape
 
-## Sources
+\`\`\`
+User
+ ↓
+Learning Agent / Orchestrator
+ ├─ retrieval tools
+ ├─ knowledge-graph tools
+ ├─ curriculum tools
+ ├─ learner-state tools
+ └─ optional web / research tools
+ ↓
+Context Engine
+ ├─ dense retrieval
+ ├─ lexical retrieval
+ ├─ query decomposition
+ ├─ graph traversal
+ ├─ parent / neighbour expansion
+ └─ adaptive context budgeting
+ ↓
+Strong reasoning model
+ ↓
+Evidence-grounded artifact
+ ├─ answer
+ ├─ study pack
+ ├─ quiz
+ └─ plan
+ ↓
+Verification + trace + persistent state
+\`\`\`
 
-- YouTube video / playlist
+## Source ingestion
+
+Supported inputs remain incremental and independent:
+
 - PDF
-- TXT / Markdown
 - DOCX
+- TXT / Markdown
 - SRT / VTT
 - pasted transcript
-- pasted JSON
-- pasted Python dictionary literal
+- JSON / Python dictionary literal
+- YouTube video / playlist
 
-## Metadata
+A user may add one source now and another later. Multiple files are supported but never required. Every source creates its own durable job.
 
-Optional fields include course, domain, topic, description, lecturer, author, week, level and arbitrary metadata.
+Optional metadata remains a weak routing signal. Content is authoritative.
 
-Hints are routing signals, not truth. The source content can disagree with the hints and the semantic index can route the material elsewhere.
+## Hierarchical content model
 
-## Durable workflow
+The source tree is represented as:
 
-Each source creates a persistent job. The worker stores:
+\`\`\`
+Course
+  ↓
+Source
+  ↓
+Document
+  ↓
+Parent chunk window
+  ↓
+Leaf chunks
+\`\`\`
+
+Leaf chunks are the retrieval unit. Parent windows preserve several adjacent leaf chunks so the synthesis model can recover local context without forcing every retrieval call to use large chunks.
+
+Each leaf has:
+
+- document position
+- parent_chunk_id
+- contextualized text
+- summary
+- embedding
+- semantic group
+- processing states
+
+Deterministic sequence relations preserve narrative order.
+
+## Knowledge graph
+
+The graph has two complementary layers.
+
+### Content relations
+
+\`\`\`
+leaf A ──next──→ leaf B
+leaf B ──next──→ leaf C
+\`\`\`
+
+### Concept relations
+
+\`\`\`
+Linear Algebra ──prerequisite──→ Eigenvalues
+Eigenvalues ──prerequisite──→ PCA
+Concept A ──related──→ Concept B
+Concept C ──contradicts──→ Concept D
+\`\`\`
+
+Prerequisite edges are directed from prerequisite to dependent concept.
+
+This enables backward traversal:
+
+\`\`\`
+PCA
+ ↓ prerequisite
+Eigenvalues
+ ↓ prerequisite
+Linear Algebra
+\`\`\`
+
+The graph is evidence-backed. A relation stores confidence and may later store supporting source references.
+
+## Grouping and concepts
+
+New leaf embeddings are compared with semantic group centroids. Strong-margin matches bypass the LLM; ambiguous candidates are validated with the fast model.
+
+Concept extraction is group-level rather than per chunk to reduce API calls.
+
+After concept extraction, relationship extraction identifies high-confidence prerequisite, related and contradiction edges inside the relevant concept set.
+
+As the system evolves, concept identity should move beyond exact string equality so the same concept can accumulate evidence from multiple courses.
+
+## Adaptive retrieval
+
+Runtime retrieval is no longer fixed top-k RAG.
+
+\`\`\`
+Question
+ ↓
+Fast query planner
+ ├─ 1–3 search views
+ ├─ target concepts
+ ├─ prerequisite need / depth
+ ├─ source-comparison flag
+ └─ complexity
+ ↓
+Group routing
+ ↓
+Parallel candidate generation
+ ├─ dense
+ └─ BM25 / lexical
+ ↓
+One RRF fusion
+ ↓
+Knowledge-graph prerequisite expansion when requested
+ ↓
+One reranking pass
+ ↓
+Parent + neighbour context expansion
+ ↓
+Adaptive final context
+\`\`\`
+
+The important design choice is that multiple query variants share one candidate pool and one rerank step. We do not pay for a separate reranker invocation per query variant.
+
+A low-coverage result can escape the group restriction once via global fallback.
+
+## Context engineering
+
+The system treats context as a managed resource rather than a fixed prompt payload.
+
+For small course scopes, long-context reasoning can replace unnecessary retrieval. For medium and large corpora, retrieval narrows the context before reasoning.
+
+Future context policies can consider:
+
+- question complexity
+- evidence quality
+- redundancy
+- prerequisite coverage
+- source diversity
+- token budget
+- cacheability
+
+## Agent architecture
+
+The model does not own the durable workflow.
+
+\`\`\`
+Agent
+  ↓ observe state
+  ↓ choose next action
+  ↓ call tool
+  ↓ inspect result
+  ↓ continue / recover / stop
+\`\`\`
+
+The local runtime keeps durable source and job state in SQLite. This keeps the current system transparent and easy to debug while leaving room for a richer graph runtime later.
+
+Tool boundaries are explicit so stronger frontier models can be adopted without rewriting the domain model.
+
+Planned internal tools include:
+
+- search_knowledge
+- search_concepts
+- traverse_prerequisites
+- get_parent_context
+- compare_sources
+- get_syllabus
+- get_learner_state
+- record_learning_event
+- generate_quiz
+- verify_answer
+- search_web
+
+## Durable execution
+
+Each source job persists:
 
 - status
-- current stage
+- plan
+- stage
 - progress
 - checkpoint
 - retry count
 - error
-- execution plan
 
-Every chunk stores independent completion state for embedding/classification/concept indexing. Completed work is skipped during resume.
+Chunk-level processing is idempotent. Existing embeddings and classifications are reused.
 
-## Organization
+Queue claiming uses compare-and-set semantics so the same queued job is not normally claimed by two workers concurrently.
 
-The system maintains three useful levels:
+The next scale step is explicit work items / leases for multi-worker execution.
 
-```text
-Course
-  ↓
-Semantic Group
-  ↓
-Concept / Evidence
-```
+## Agent traces
 
-A course is a user learning container. Groups are semantic areas shared across many sources. Concepts are canonical learning units with evidence links.
+Study runs persist a compact trace containing:
 
-## Efficient grouping
+- run id
+- model/task
+- query plan
+- selected groups
+- target concepts
+- retrieved chunk ids
+- latency
+- result counts
 
-New chunks are compared to group centroids rather than every chunk. Strong-margin matches are assigned without an LLM call. Only ambiguous candidates use LLM validation.
-
-Concept extraction is group-level so the system does not perform one expensive concept extraction call per chunk.
-
-## Curriculum
-
-The syllabus engine merges repeated concepts across sources and asks Gemini 3.8 Flash to order prerequisites before dependent topics. User outlines are optional planning preferences and are not treated as evidence.
-
-## Study
-
-For a selected topic, the retrieval engine finds evidence from the selected course, builds a study pack, cites the source chunks, and produces copy-paste-ready text for a separate ChatGPT/Gemini tutoring session.
-
-## Modern architecture decisions
-
-### Adopted
-
-- structure-aware chunking
-- context-enriched indexing
-- dense + lexical hybrid retrieval
-- Reciprocal Rank Fusion
-- reranking only after candidate reduction
-- query planning
-- context-window expansion
-- persistent checkpoints
-- task-aware model routing
-- structured model outputs
-
-### Intentionally optional
-
-- LLM-generated contextualization for every chunk: useful but API-expensive; enabled only for small sources if configured
-- dedicated Qdrant/ANN vector infrastructure: useful as corpus size grows; the current SQLite/NumPy path keeps v0.2 immediately runnable and testable
-- specialized ColBERT/late-interaction reranking: excellent for larger deployments, but Gemini Lite reranking is easier to run with the current free-first constraints
+This gives us a local audit/debug surface and creates the foundation for regression analysis.
 
 ## Model routing
 
-```text
-Gemini 3.5 Flash-Lite
-  → classification / routing / query planning / reranking / concept extraction
+Default routing remains task-based:
 
-Gemini 3.8 Flash
-  → syllabus / study synthesis / difficult reasoning / future agent planning
+\`\`\`
+Fast model
+ → profiling / routing / extraction / relationships / reranking
 
-Gemini Embedding 2
-  → semantic embeddings
-```
+Reasoning model
+ → syllabus / study synthesis / difficult planning
 
-## Primary design principle
+Embedding model
+ → dense representations
+\`\`\`
 
-Use the strongest technique that materially improves this project's learning workflow, but avoid adding infrastructure that creates cost or complexity without a measurable retrieval/learning benefit.
+The architecture intentionally avoids hard-coding one vendor into the system domain. The provider layer should remain replaceable.
+
+## Retrieval backend evolution
+
+Current local mode:
+
+\`\`\`
+SQLite
+ → metadata + workflow + graph + embeddings
+\`\`\`
+
+Scale-up mode:
+
+\`\`\`
+SQLite
+ → metadata + workflow + graph
+
+Qdrant
+ → dense + sparse + future multivector retrieval
+\`\`\`
+
+Qdrant should be introduced when corpus size or latency makes in-process scanning the bottleneck, not simply because a vector database is fashionable.
+
+## Evaluation
+
+A small golden set is part of the product architecture.
+
+Start with 20–50 real questions and measure:
+
+- Recall@5 / Recall@10
+- MRR
+- citation correctness
+- prerequisite traversal usefulness
+- group accuracy
+- duplicate concept rate
+- resume correctness
+- duplicate-ingestion safety
+- processing time
+- model/API call counts
+
+Every significant model or retrieval change should run the regression suite.
+
+## Explicit non-goals
+
+- self-modifying source code
+- autonomous internet browsing for every question
+- multi-agent orchestration for trivial questions
+- mandatory cloud infrastructure
+- forcing the user to upload all materials at once
+
+## Design principle
+
+The model may change tomorrow. The knowledge, evidence, graph, state, tools and evaluations should continue working.

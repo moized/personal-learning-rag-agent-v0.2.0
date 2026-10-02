@@ -1,21 +1,19 @@
-"""Modern hybrid RAG retrieval implemented with zero extra runtime services.
-
-Dense retrieval handles semantic similarity; BM25 handles exact technical terms;
-RRF fuses both; an optional Gemini reranker chooses the final evidence set.
-"""
+"""Adaptive hybrid retrieval with graph-aware context expansion."""
 from __future__ import annotations
 
+import json
 import math
 import re
-import json
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+from ..config import settings
 from ..models import Chunk, Document, Source, Group
 from ..providers.base import AIProvider
-from ..config import settings
 from .grouping import cosine
+from .knowledge_graph import prerequisite_evidence_chunks
 
 TOKEN_RE = re.compile(r"[\w./:+#-]+", re.UNICODE)
 
@@ -56,7 +54,7 @@ def _course_chunks(db: Session, course_id: int | None, group_ids: list[int] | No
         select(Chunk)
         .join(Document, Chunk.document_id == Document.id)
         .join(Source, Document.source_id == Source.id)
-        .where(Chunk.embedding_status == "done")
+        .where(Chunk.embedding_status == "done", Chunk.chunk_kind == "leaf")
     )
     if group_ids:
         stmt = stmt.where(Chunk.group_id.in_(group_ids))
@@ -65,7 +63,13 @@ def _course_chunks(db: Session, course_id: int | None, group_ids: list[int] | No
     return db.execute(stmt.order_by(Chunk.id)).scalars().all()
 
 
-def group_candidates(db: Session, query_embedding: list[float], primary_group_id: int | None, limit: int, course_id: int | None = None) -> list[int]:
+def group_candidates(
+    db: Session,
+    query_embedding: list[float],
+    primary_group_id: int | None,
+    limit: int,
+    course_id: int | None = None,
+) -> list[int]:
     groups = db.execute(select(Group)).scalars().all()
     allowed: set[int] | None = None
     if course_id is not None:
@@ -73,7 +77,11 @@ def group_candidates(db: Session, query_embedding: list[float], primary_group_id
             select(Chunk.group_id)
             .join(Document, Chunk.document_id == Document.id)
             .join(Source, Document.source_id == Source.id)
-            .where(Source.course_id == course_id, Chunk.embedding_status == "done")
+            .where(
+                Source.course_id == course_id,
+                Chunk.embedding_status == "done",
+                Chunk.chunk_kind == "leaf",
+            )
         ).all()
         allowed = {row[0] for row in rows if row[0] is not None}
     scored: list[tuple[int, float]] = []
@@ -95,22 +103,6 @@ def group_candidates(db: Session, query_embedding: list[float], primary_group_id
     return ids[:limit]
 
 
-def _rank_dict(items: list[Chunk]) -> dict[int, int]:
-    return {chunk.id: rank + 1 for rank, chunk in enumerate(items)}
-
-
-def rrf_fuse(dense: list[tuple[Chunk, float]], lexical: list[tuple[Chunk, float]], k: int = 60) -> list[tuple[Chunk, float]]:
-    by_id = {c.id: c for c, _ in dense}
-    by_id.update({c.id: c for c, _ in lexical})
-    scores: defaultdict[int, float] = defaultdict(float)
-    for rank, (chunk, _) in enumerate(dense, 1):
-        scores[chunk.id] += 1.0 / (k + rank)
-    for rank, (chunk, _) in enumerate(lexical, 1):
-        scores[chunk.id] += 1.0 / (k + rank)
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[: settings.fused_candidate_k]
-    return [(by_id[cid], score) for cid, score in ranked]
-
-
 def _dense_rank(query_embedding: list[float], chunks: list[Chunk], limit: int) -> list[tuple[Chunk, float]]:
     scored: list[tuple[Chunk, float]] = []
     for chunk in chunks:
@@ -130,17 +122,60 @@ def _lexical_rank(question: str, chunks: list[Chunk], limit: int) -> list[tuple[
     return [item for item in ranked[:limit] if item[1] > 0]
 
 
-def _llm_rerank(ai: AIProvider, question: str, candidates: list[tuple[Chunk, float]], final_k: int) -> list[tuple[Chunk, float]]:
+def rrf_fuse(
+    dense: list[tuple[Chunk, float]],
+    lexical: list[tuple[Chunk, float]],
+    k: int = 60,
+) -> list[tuple[Chunk, float]]:
+    by_id = {c.id: c for c, _ in dense}
+    by_id.update({c.id: c for c, _ in lexical})
+    scores: defaultdict[int, float] = defaultdict(float)
+    for rank, (chunk, _) in enumerate(dense, 1):
+        scores[chunk.id] += 1.0 / (k + rank)
+    for rank, (chunk, _) in enumerate(lexical, 1):
+        scores[chunk.id] += 1.0 / (k + rank)
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return [(by_id[cid], score) for cid, score in ranked[: settings.fused_candidate_k]]
+
+
+def rrf_fuse_many(
+    retrieval_lists: list[tuple[list[tuple[Chunk, float]], list[tuple[Chunk, float]]]],
+    k: int = 60,
+) -> list[tuple[Chunk, float]]:
+    """Fuse all query variants once, rather than reranking each query separately."""
+    by_id: dict[int, Chunk] = {}
+    scores: defaultdict[int, float] = defaultdict(float)
+    for dense, lexical in retrieval_lists:
+        for rank, (chunk, _) in enumerate(dense, 1):
+            by_id[chunk.id] = chunk
+            scores[chunk.id] += 1.0 / (k + rank)
+        for rank, (chunk, _) in enumerate(lexical, 1):
+            by_id[chunk.id] = chunk
+            scores[chunk.id] += 1.0 / (k + rank)
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return [(by_id[cid], score) for cid, score in ranked[: settings.fused_candidate_k]]
+
+
+def _llm_rerank(
+    ai: AIProvider,
+    question: str,
+    candidates: list[tuple[Chunk, float]],
+    final_k: int,
+) -> list[tuple[Chunk, float]]:
     if not settings.use_llm_reranker or not candidates:
         return candidates[:final_k]
     blocks = []
     for chunk, fused in candidates:
-        blocks.append(f"CHUNK_ID={chunk.id}\nFUSED={fused:.6f}\nTEXT={(chunk.contextual_text or chunk.text)[:2800]}")
-    prompt = f"""Rank the evidence for this learning question. Do not invent missing evidence.
+        blocks.append(
+            f"CHUNK_ID={chunk.id}\nFUSED={fused:.6f}\nTEXT={(chunk.contextual_text or chunk.text)[:2800]}"
+        )
+    prompt = f"""Rank the evidence for this learning question.
+Do not invent missing evidence.
+Give preference to evidence that directly answers the question, including prerequisite evidence when it explains a required missing concept.
 Question: {question}
 Candidates:
 {chr(10).join(blocks)}
-Return JSON with a `ranked` array. Each item must contain `chunk_id` and `relevance` from 0 to 1. Include only candidate IDs.
+Return JSON with a ranked array. Each item must contain chunk_id and relevance from 0 to 1. Include only candidate IDs.
 """
     schema = {
         "type": "object",
@@ -166,7 +201,12 @@ Return JSON with a `ranked` array. Each item must contain `chunk_id` and `releva
         for item in result.get("ranked", []):
             cid = int(item.get("chunk_id", -1))
             if cid in lookup:
-                ranked.append((lookup[cid], max(0.0, min(1.0, float(item.get("relevance", 0.0))))))
+                ranked.append(
+                    (
+                        lookup[cid],
+                        max(0.0, min(1.0, float(item.get("relevance", 0.0)))),
+                    )
+                )
         if ranked:
             return ranked[:final_k]
     except Exception:
@@ -174,17 +214,32 @@ Return JSON with a `ranked` array. Each item must contain `chunk_id` and `releva
     return candidates[:final_k]
 
 
-
-def expand_context_window(db: Session, ranked: list[tuple[Chunk, float]], radius: int = 1, max_items: int = 12) -> list[tuple[Chunk, float]]:
-    """Add immediate same-document neighbors for lecture/transcript continuity."""
+def expand_context_window(
+    db: Session,
+    ranked: list[tuple[Chunk, float]],
+    radius: int = 1,
+    max_items: int = 12,
+) -> list[tuple[Chunk, float]]:
+    """Expand each selected leaf to its parent window and nearby leaves."""
     if not ranked:
         return ranked
+
     seen = {c.id for c, _ in ranked}
     additions: list[tuple[Chunk, float]] = []
+
     for chunk, score in ranked:
+        if chunk.parent_chunk_id:
+            parent = db.get(Chunk, chunk.parent_chunk_id)
+            if parent and parent.id not in seen:
+                seen.add(parent.id)
+                additions.append((parent, score * 0.90))
+                if len(ranked) + len(additions) >= max_items:
+                    break
+
         neighbors = db.execute(
             select(Chunk).where(
                 Chunk.document_id == chunk.document_id,
+                Chunk.chunk_kind == "leaf",
                 Chunk.chunk_index >= max(0, chunk.chunk_index - radius),
                 Chunk.chunk_index <= chunk.chunk_index + radius,
                 Chunk.embedding_status == "done",
@@ -194,12 +249,76 @@ def expand_context_window(db: Session, ranked: list[tuple[Chunk, float]], radius
             if neighbor.id in seen:
                 continue
             seen.add(neighbor.id)
-            additions.append((neighbor, score * 0.85))
+            additions.append((neighbor, score * 0.82))
             if len(ranked) + len(additions) >= max_items:
                 break
         if len(ranked) + len(additions) >= max_items:
             break
+
     return (ranked + additions)[:max_items]
+
+
+def retrieve_many(
+    db: Session,
+    ai: AIProvider,
+    queries: list[str],
+    group_ids: list[int] | None = None,
+    top_k: int | None = None,
+    course_id: int | None = None,
+    target_concepts: list[str] | None = None,
+    prerequisite_depth: int = 0,
+    rerank_question: str | None = None,
+) -> list[tuple[Chunk, float]]:
+    """Retrieve from multiple query views, fuse once, graph-expand, then rerank once."""
+    queries = [q.strip() for q in queries if q and q.strip()]
+    if not queries:
+        return []
+
+    final_k = top_k or settings.final_context_k
+    chunks = _course_chunks(db, course_id=course_id, group_ids=group_ids)
+    embeddings = ai.embed(queries)
+    if len(embeddings) != len(queries):
+        raise RuntimeError("Embedding provider returned a mismatched query batch size")
+
+    retrieval_lists: list[
+        tuple[list[tuple[Chunk, float]], list[tuple[Chunk, float]]]
+    ] = []
+    for query, embedding in zip(queries, embeddings):
+        retrieval_lists.append(
+            (
+                _dense_rank(embedding, chunks, settings.dense_candidate_k),
+                _lexical_rank(query, chunks, settings.lexical_candidate_k),
+            )
+        )
+
+    fused = rrf_fuse_many(retrieval_lists)
+
+    graph_items = prerequisite_evidence_chunks(
+        db,
+        target_concept_names=target_concepts or [],
+        depth=min(prerequisite_depth, settings.prerequisite_max_depth),
+        course_id=course_id,
+        limit=settings.prerequisite_evidence_k,
+    )
+
+    by_id = {chunk.id: (chunk, score) for chunk, score in fused}
+    for chunk, score, _concept in graph_items:
+        current = by_id.get(chunk.id)
+        if current is None:
+            by_id[chunk.id] = (chunk, score)
+        else:
+            by_id[chunk.id] = (chunk, max(current[1], score))
+
+    candidates = sorted(by_id.values(), key=lambda item: item[1], reverse=True)
+    candidates = candidates[: settings.fused_candidate_k]
+    reranked = _llm_rerank(ai, rerank_question or queries[0], candidates, final_k)
+    return expand_context_window(
+        db,
+        reranked,
+        radius=1,
+        max_items=min(final_k + 5, 16),
+    )
+
 
 def retrieve(
     db: Session,
@@ -209,15 +328,14 @@ def retrieve(
     top_k: int | None = None,
     course_id: int | None = None,
 ) -> list[tuple[Chunk, float]]:
-    top_k = top_k or settings.final_context_k
-    query_embedding = ai.embed([question])[0]
-    chunks = _course_chunks(db, course_id=course_id, group_ids=group_ids)
-    dense = _dense_rank(query_embedding, chunks, settings.dense_candidate_k)
-    lexical = _lexical_rank(question, chunks, settings.lexical_candidate_k)
-    fused = rrf_fuse(dense, lexical)
-    reranked = _llm_rerank(ai, question, fused, top_k)
-    return expand_context_window(db, reranked, radius=1, max_items=min(top_k + 4, 12))
+    return retrieve_many(
+        db,
+        ai,
+        [question],
+        group_ids=group_ids,
+        top_k=top_k,
+        course_id=course_id,
+    )
 
 
-# Backward-compatible alias for older imports.
 group_candidates_legacy = group_candidates
