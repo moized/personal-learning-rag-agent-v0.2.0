@@ -1,5 +1,5 @@
 from datetime import datetime, UTC
-from sqlalchemy import String, Text, Integer, Float, ForeignKey, UniqueConstraint, DateTime
+from sqlalchemy import String, Text, Integer, Float, ForeignKey, UniqueConstraint, DateTime, Index
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
@@ -67,6 +67,7 @@ class Chunk(Base):
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
     parent_chunk_id: Mapped[int | None] = mapped_column(ForeignKey("chunks.id"), nullable=True, index=True)
     chunk_index: Mapped[int] = mapped_column(Integer)
+    chunk_kind: Mapped[str] = mapped_column(String(20), default="leaf", index=True)
     text: Mapped[str] = mapped_column(Text)
     contextual_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -78,7 +79,24 @@ class Chunk(Base):
     group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id"), nullable=True, index=True)
     group_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    __table_args__ = (UniqueConstraint("document_id", "chunk_index", name="uq_document_chunk"),)
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_index", name="uq_document_chunk"),
+        Index("ix_chunk_document_kind_index", "document_id", "chunk_kind", "chunk_index"),
+    )
+
+
+class ChunkRelation(Base):
+    __tablename__ = "chunk_relations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    from_chunk_id: Mapped[int] = mapped_column(ForeignKey("chunks.id"), index=True)
+    to_chunk_id: Mapped[int] = mapped_column(ForeignKey("chunks.id"), index=True)
+    relation_type: Mapped[str] = mapped_column(String(50), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("from_chunk_id", "to_chunk_id", "relation_type", name="uq_chunk_relation"),
+    )
 
 
 class Concept(Base):
@@ -90,6 +108,20 @@ class Concept(Base):
     group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id"), nullable=True, index=True)
 
 
+class ConceptRelation(Base):
+    __tablename__ = "concept_relations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    from_concept_id: Mapped[int] = mapped_column(ForeignKey("concepts.id"), index=True)
+    to_concept_id: Mapped[int] = mapped_column(ForeignKey("concepts.id"), index=True)
+    relation_type: Mapped[str] = mapped_column(String(50), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("from_concept_id", "to_concept_id", "relation_type", name="uq_concept_relation"),
+    )
+
+
 class Evidence(Base):
     __tablename__ = "evidence"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -98,6 +130,22 @@ class Evidence(Base):
     relation: Mapped[str] = mapped_column(String(50), default="supports")
     score: Mapped[float] = mapped_column(Float, default=1.0)
     __table_args__ = (UniqueConstraint("concept_id", "chunk_id", name="uq_concept_chunk"),)
+
+
+class AgentTrace(Base):
+    __tablename__ = "agent_traces"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), index=True)
+    parent_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(50), index=True)
+    task: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="ok")
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class Job(Base):
