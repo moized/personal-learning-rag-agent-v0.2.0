@@ -267,6 +267,7 @@ def retrieve_many(
     course_id: int | None = None,
     target_concepts: list[str] | None = None,
     prerequisite_depth: int = 0,
+    rerank_question: str | None = None,
 ) -> list[tuple[Chunk, float]]:
     """Retrieve from multiple query views, fuse once, graph-expand, then rerank once."""
     queries = [q.strip() for q in queries if q and q.strip()]
@@ -276,6 +277,8 @@ def retrieve_many(
     final_k = top_k or settings.final_context_k
     chunks = _course_chunks(db, course_id=course_id, group_ids=group_ids)
     embeddings = ai.embed(queries)
+    if len(embeddings) != len(queries):
+        raise RuntimeError("Embedding provider returned a mismatched query batch size")
 
     retrieval_lists: list[
         tuple[list[tuple[Chunk, float]], list[tuple[Chunk, float]]]
@@ -308,7 +311,7 @@ def retrieve_many(
 
     candidates = sorted(by_id.values(), key=lambda item: item[1], reverse=True)
     candidates = candidates[: settings.fused_candidate_k]
-    reranked = _llm_rerank(ai, queries[0], candidates, final_k)
+    reranked = _llm_rerank(ai, rerank_question or queries[0], candidates, final_k)
     return expand_context_window(
         db,
         reranked,
