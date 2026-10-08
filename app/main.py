@@ -16,6 +16,7 @@ from .services.files import save_upload, save_text_content
 from .services.queue import enqueue
 from .services.worker import Worker
 from .providers.factory import provider
+from .routers.learner import router as learner_router
 from .services.study import answer
 from .services.curriculum import build_syllabus, build_syllabus_structured, build_study_pack_prompt, build_external_study_pack
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url
@@ -28,6 +29,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(learner_router)
 worker: Worker | None = None
 _study_plan_locks: dict[str, threading.Lock] = {}
 _study_plan_locks_guard = threading.Lock()

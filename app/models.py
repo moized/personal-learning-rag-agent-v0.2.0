@@ -253,3 +253,53 @@ class MaintenanceJob(Base):
     items_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     errors_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, index=True)
+
+
+class LearnerEvent(Base):
+    """Append-only log of everything the learner does; mastery is derived from it."""
+    __tablename__ = "learner_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    concept_id: Mapped[int | None] = mapped_column(ForeignKey("concepts.id"), nullable=True, index=True)
+    course_id: Mapped[int | None] = mapped_column(ForeignKey("courses.id"), nullable=True, index=True)
+    quiz_item_id: Mapped[int | None] = mapped_column(ForeignKey("quiz_items.id"), nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class ConceptMastery(Base):
+    """Current learner state for one concept, including its SM-2 review schedule."""
+    __tablename__ = "concept_mastery"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    concept_id: Mapped[int] = mapped_column(ForeignKey("concepts.id"), unique=True, index=True)
+    mastery: Mapped[float] = mapped_column(Float, default=0.0)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    correct_count: Mapped[int] = mapped_column(Integer, default=0)
+    ease: Mapped[float] = mapped_column(Float, default=2.5)
+    interval_days: Mapped[float] = mapped_column(Float, default=0.0)
+    repetitions: Mapped[int] = mapped_column(Integer, default=0)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class Misconception(Base):
+    __tablename__ = "misconceptions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    concept_id: Mapped[int] = mapped_column(ForeignKey("concepts.id"), index=True)
+    description: Mapped[str] = mapped_column(Text)
+    occurrences: Mapped[int] = mapped_column(Integer, default=1)
+    resolved: Mapped[bool] = mapped_column(default=False, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class QuizItem(Base):
+    __tablename__ = "quiz_items"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    concept_id: Mapped[int] = mapped_column(ForeignKey("concepts.id"), index=True)
+    course_id: Mapped[int | None] = mapped_column(ForeignKey("courses.id"), nullable=True, index=True)
+    question: Mapped[str] = mapped_column(Text)
+    reference_answer: Mapped[str] = mapped_column(Text)
+    evidence_chunk_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

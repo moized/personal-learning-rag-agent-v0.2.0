@@ -1,6 +1,6 @@
 # LearnOS Roadmap
 
-## v0.4 — Adaptive Knowledge Architecture (current)
+## v0.4 — Adaptive Knowledge Architecture
 
 - hierarchical parent/leaf chunk structure
 - deterministic next-chunk links
@@ -24,7 +24,7 @@
 - retrieval benchmark dashboard
 - token / latency / cost ledger
 
-## v0.6 — Learner intelligence
+## v0.6 — Learner intelligence (backend implemented; UI pending)
 
 - learner event model
 - concept mastery state

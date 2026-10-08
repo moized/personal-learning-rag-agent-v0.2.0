@@ -9,6 +9,7 @@ from ..models import Chunk, Document, Source, AgentTrace
 from ..providers.base import AIProvider
 from ..config import settings
 from .knowledge_graph import resolve_concepts
+from .learner import log_event, open_misconceptions
 from .retrieval import retrieve_many, group_candidates
 
 
@@ -168,6 +169,13 @@ def answer(
 
     graph_concepts = resolve_concepts(db, query_plan["target_concepts"])
     concept_names = [c.canonical_name for c in graph_concepts]
+    for concept in graph_concepts:
+        log_event(db, "question", concept_id=concept.id, course_id=course_id, payload={"run_id": run_id})
+    misconceptions = open_misconceptions(db, [c.id for c in graph_concepts])
+    misconception_context = (
+        "Known learner misconceptions on these topics (address them gently only if relevant to the question):\n"
+        + "\n".join(f"- {m.description}" for m in misconceptions[:5]) + "\n"
+    ) if misconceptions else ""
 
     context_blocks = []
     source_refs = []
@@ -195,7 +203,7 @@ Distinguish direct evidence from synthesis, and explicitly say when the evidence
 Use concise citations like [chunk:123] next to factual claims when possible.
 When prerequisite evidence is present, use it only to explain dependencies needed for the target topic.
 When source comparison is requested, distinguish differences between sources rather than merging them silently.
-{conversation_context}
+{conversation_context}{misconception_context}
 Question: {question}
 Evidence:
 {context}

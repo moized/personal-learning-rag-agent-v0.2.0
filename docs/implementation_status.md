@@ -20,6 +20,17 @@
 - Syllabus generation, study packs and Vite/React incremental source UI.
 - Initial retrieval evaluation helpers and 20–50-question eval format.
 
+## v0.6 learner intelligence (backend, unreleased)
+
+- Append-only learner event log; `/study` logs a `question` event per resolved concept.
+- Per-concept mastery with forgetting-curve decay and SM-2 spaced-review scheduling.
+- Evidence-grounded quiz generation and LLM grading with an offline keyword-overlap fallback.
+- Misconception tracking, fed back into tutor answers and quiz generation.
+- Adaptive "what next": due reviews, weak concepts, then concepts whose prerequisites are mastered.
+- Endpoints: `POST /quiz/generate`, `POST /quiz/{id}/answer`, `POST /learner/self-rating`,
+  `GET /learner/{mastery,due,next,misconceptions}`, `POST /learner/misconceptions/{id}/resolve`.
+- Not yet: web UI for review/quiz/progress, adaptive reordering of the persisted study plan.
+
 ## Intentionally not the default yet
 
 - Qdrant / sparse ANN infrastructure.
