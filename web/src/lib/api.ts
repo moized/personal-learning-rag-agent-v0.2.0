@@ -6,6 +6,13 @@ export type Stats={sources:number;documents:number;chunks:number;embedded:number
 export type ChatTurn={role:"user"|"assistant";content:string}
 export type ConversationSummary={id:string;title:string;created_at:string;updated_at:string}
 export type StudyPackExport={topic:string;study_text:string;sources:{chunk_id:number;source:string;title?:string|null;section?:string|null}[];copy_paste_ready:boolean;estimated_tokens:number;max_input_tokens:number;omitted_passages:number;suggested_subtopics:string[]}
+export type MasteryStatus="unseen"|"learning"|"due"|"mastered"
+export type ConceptMastery={concept_id:number;concept:string;mastery:number;confidence:number;attempts:number;status:MasteryStatus;next_due_at:string|null}
+export type DueReview={concept_id:number;concept:string;mastery:number;due_at:string;overdue_days:number}
+export type NextTopic={concept_id:number;concept:string;reason:string;mastery:number;blocking_prerequisites:string[]}
+export type Misconception={id:number;concept_id:number;concept:string|null;description:string;occurrences:number;resolved:boolean;last_seen_at:string}
+export type QuizQuestion={id:number;question:string}
+export type QuizResult={quiz_item_id:number;score:number;correct:boolean;feedback:string;reference_answer:string;evidence_chunk_ids:number[];misconception:string|null;mastery:number;next_due_at:string|null}
 const BASE=import.meta.env.VITE_API_URL||"http://localhost:8000"
 async function req<T>(path:string,init?:RequestInit):Promise<T>{
  const r=await fetch(BASE+path,{...init,cache:"no-store"})
@@ -59,5 +66,13 @@ export const api={
  syllabus:(id?:number)=>req<{syllabus:string;revision:string;source_relationships:{sources:any[];cross_paths:any[];shared_foundations:string[]};nodes:{id:string;parent_id:string|null;path_id:string;type:"outline"|"study";title:string;metadata:Record<string,any>}[]}>("/syllabus"+(id?"?course_id="+id:"")),
  studyPack:(topic:string,id?:number)=>req<any>("/study-pack",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,course_id:id||null,top_k:12})}),
  exportStudyPack:(topic:string,id:number|undefined,tutor:string,maxInputTokens:number,topicId?:string)=>req<StudyPackExport>("/study-pack/export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,topic_id:topicId||null,course_id:id||null,top_k:20,tutor,max_input_tokens:maxInputTokens})}),
- study:(question:string,id?:number,history:ChatTurn[]=[],retrievalScope:"space_only"|"space_and_related"|"all_sources"="space_only")=>req<any>("/study",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question,course_id:id||null,top_k:8,history:history.slice(-8),retrieval_scope:retrievalScope})})
+ study:(question:string,id?:number,history:ChatTurn[]=[],retrievalScope:"space_only"|"space_and_related"|"all_sources"="space_only")=>req<any>("/study",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question,course_id:id||null,top_k:8,history:history.slice(-8),retrieval_scope:retrievalScope})}),
+ learnerMastery:(courseId?:number)=>req<{concepts:ConceptMastery[]}>("/learner/mastery"+(courseId?"?course_id="+courseId:"")),
+ learnerDue:(courseId?:number)=>req<{due:DueReview[]}>("/learner/due"+(courseId?"?course_id="+courseId:"")),
+ learnerNext:(courseId?:number)=>req<{next:NextTopic[]}>("/learner/next"+(courseId?"?course_id="+courseId:"")),
+ misconceptions:()=>req<{misconceptions:Misconception[]}>("/learner/misconceptions"),
+ resolveMisconception:(id:number)=>req<{id:number;resolved:boolean}>(`/learner/misconceptions/${id}/resolve`,{method:"POST"}),
+ selfRating:(conceptId:number,rating:number,courseId?:number)=>req<{concept_id:number;mastery:number;next_due_at:string|null}>("/learner/self-rating",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({concept_id:conceptId,rating,course_id:courseId||null})}),
+ generateQuiz:(conceptId:number,courseId?:number)=>req<{concept_id:number;concept:string;items:QuizQuestion[]}>("/quiz/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({concept_id:conceptId,course_id:courseId||null,count:1})}),
+ answerQuiz:(itemId:number,answer:string)=>req<QuizResult>(`/quiz/${itemId}/answer`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({answer})})
 }

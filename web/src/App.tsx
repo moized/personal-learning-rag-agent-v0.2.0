@@ -1,8 +1,9 @@
 import {useEffect,useMemo,useRef,useState,type FormEvent,type KeyboardEvent,type ReactNode} from "react"
-import {Check,Copy,FileText,FolderOpen,GraduationCap,Library,LoaderCircle,MessageSquare,Paperclip,Plus,RefreshCw,Send,Sparkles,Trash2,UploadCloud,X} from "lucide-react"
+import {Brain,Check,Copy,FileText,FolderOpen,GraduationCap,Library,LoaderCircle,MessageSquare,Paperclip,Plus,RefreshCw,Send,Sparkles,Trash2,UploadCloud,X} from "lucide-react"
 import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type Source,type StudyPackExport} from "./lib/api"
+import LearnView from "./Learn"
 
-type View="chat"|"library"|"plan"
+type View="chat"|"library"|"plan"|"learn"
 type ChatMessage={id:string;role:"user"|"assistant";content:string;evidenceCount?:number;supplementalSourceCount?:number;supplementalSources?:string[];retryJobId?:number}
 type AddMode="file"|"youtube"|"paste"
 type OutlineTopic={id:string;parentId:string;pathId:string;kind:"outline"|"study";topic:string;purpose:string;prerequisites:string;groups:string[];why:string;enables:string;sourceIds:number[];sourceRoles:string[];confidence:number}
@@ -241,6 +242,7 @@ export default function App(){
       <nav className="primary-nav" aria-label="Main navigation">
         <button className={view==="chat"?"selected":""} onClick={()=>setView("chat")}><MessageSquare size={17}/>Chat</button>
         <button className={view==="plan"?"selected":""} onClick={()=>setView("plan")}><GraduationCap size={17}/>Study plan</button>
+        <button className={view==="learn"?"selected":""} onClick={()=>setView("learn")}><Brain size={17}/>Practice</button>
         <button className={view==="library"?"selected":""} onClick={()=>setView("library")}><Library size={17}/>Library <span className="nav-count">{sources.length}</span></button>
       </nav>
       <div className="sidebar-section"><div className="sidebar-label">Your library</div>
@@ -260,7 +262,7 @@ export default function App(){
 
     <main className="main-area">
       <header className="app-header">
-        <div className="header-title"><div className="mobile-brand"><span className="brand-mark"><Sparkles size={16}/></span>LearnOS</div><h1>{view==="chat"?"Chat":view==="plan"?"Study plan":"Your library"}</h1><div className="mobile-course-control"><select aria-label="Choose course" className="course-select" value={courseId||""} onChange={event=>setCourseId(event.target.value?Number(event.target.value):undefined)}><option value="">All sources</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}</select><button className="text-link" onClick={()=>void createCourse()}><Plus size={14}/>Course</button></div></div>
+        <div className="header-title"><div className="mobile-brand"><span className="brand-mark"><Sparkles size={16}/></span>LearnOS</div><h1>{view==="chat"?"Chat":view==="plan"?"Study plan":view==="learn"?"Practice":"Your library"}</h1><div className="mobile-course-control"><select aria-label="Choose course" className="course-select" value={courseId||""} onChange={event=>setCourseId(event.target.value?Number(event.target.value):undefined)}><option value="">All sources</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}</select><button className="text-link" onClick={()=>void createCourse()}><Plus size={14}/>Course</button></div></div>
         <div className="header-actions">
           {activeJobs.length>0&&<Badge><LoaderCircle size={13}/>{activeJobs.length} processing</Badge>}
           <button className="icon-button" aria-label="Refresh" title="Refresh" onClick={()=>void refresh()}><RefreshCw size={16}/></button>
@@ -268,7 +270,7 @@ export default function App(){
         </div>
       </header>
       {error&&<div className="global-error" role="alert">{error}</div>}
-      {view==="chat"?<ChatView messages={messages} busy={busy} activeJobs={activeJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} send={sendMessage} addSource={()=>setAddOpen(true)} courseSelected={courseId!==undefined}/>:view==="plan"?<StudyPlanView courseId={courseId} refreshKey={planRefreshKey} addSource={()=>setAddOpen(true)}/>:<LibraryView sources={sources} courses={courses} jobs={currentJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} refresh={refresh} addSource={()=>setAddOpen(true)}/>}
+      {view==="chat"?<ChatView messages={messages} busy={busy} activeJobs={activeJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} send={sendMessage} addSource={()=>setAddOpen(true)} courseSelected={courseId!==undefined}/>:view==="learn"?<LearnView courseId={courseId}/>:view==="plan"?<StudyPlanView courseId={courseId} refreshKey={planRefreshKey} addSource={()=>setAddOpen(true)}/>:<LibraryView sources={sources} courses={courses} jobs={currentJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} refresh={refresh} addSource={()=>setAddOpen(true)}/>}
     </main>
     {addOpen&&<AddSourceDialog courseId={courseId} courses={courses} close={()=>setAddOpen(false)} refresh={refresh}/>}
   </div>
