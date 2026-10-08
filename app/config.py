@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Configuration separating cheap background model calls from reasoning-heavy calls."""
+    """Configuration for an adaptive, durable learning system."""
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Personal Learning Knowledge Agent"
@@ -22,18 +22,23 @@ class Settings(BaseSettings):
 
     chunk_size: int = 1800
     chunk_overlap: int = 220
+    parent_chunk_window: int = 3
     contextual_indexing: bool = False
     contextual_indexing_max_chunks: int = 80
     group_similarity_threshold: float = 0.78
     group_candidates: int = 8
     group_llm_validation: bool = True
     concept_extraction: bool = True
+    concept_relationships: bool = True
+    relationship_min_confidence: float = 0.72
 
     dense_candidate_k: int = 24
     lexical_candidate_k: int = 24
-    fused_candidate_k: int = 20
+    fused_candidate_k: int = 30
     final_context_k: int = 8
     retrieval_group_limit: int = 4
+    prerequisite_max_depth: int = 2
+    prerequisite_evidence_k: int = 8
     use_llm_query_planner: bool = True
     use_llm_reranker: bool = True
 

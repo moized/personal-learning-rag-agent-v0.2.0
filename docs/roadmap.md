@@ -1,54 +1,61 @@
-# Roadmap
+# LearnOS Roadmap
 
-## v0.2 — Current
+## v0.4 — Adaptive Knowledge Architecture (current)
 
-- durable local job queue
-- YouTube/video transcript ingestion
-- manual transcript/SRT/VTT input
-- optional JSON/Python-dict metadata
-- source profiles
-- structure-aware chunks
-- batched embeddings
-- semantic groups
-- group-level concept extraction
-- hybrid dense + BM25 retrieval
-- RRF
-- optional LLM reranking
-- context-window expansion
-- course syllabus
-- copy-paste study packs
+- hierarchical parent/leaf chunk structure
+- deterministic next-chunk links
+- concept relationship graph
+- prerequisite traversal during retrieval
+- adaptive query planning
+- multi-query retrieval with one fusion and one rerank stage
+- parent + neighbour context expansion
+- durable graph workflow stage
+- compare-and-set queue claiming
+- study-run traces
+- retrieval evaluation helpers and golden-set format
 
-## v0.3 — Scale the index
+## v0.5 — Retrieval at scale
 
-- optional Qdrant backend
+- Qdrant dense + sparse backend
 - persistent lexical index
-- embedding cache/versioning
-- source-level incremental re-indexing
-- better section/heading extraction for PDFs
-- background metrics and cost ledger
+- embedding cache and embedding versioning
+- incremental re-indexing by affected source/section
+- better PDF section / heading extraction
+- retrieval benchmark dashboard
+- token / latency / cost ledger
 
-## v0.4 — Learning intelligence
+## v0.6 — Learner intelligence
 
-- prerequisite graph
-- adaptive study plan
-- mastery tracking
+- learner event model
+- concept mastery state
+- misconception tracking
+- adaptive curriculum
+- quiz generation and grading
 - spaced review
-- quiz generation/evaluation
-- concept conflict detection
 
-## v0.5 — Research agent
+## v0.7 — Research agent
 
-- web discovery
+- web discovery tools
 - source quality validation
-- date/relevance filtering
+- date and freshness filtering
 - evidence comparison
-- current-vs-historical topic classification
-- syllabus refresh after trusted external research
+- current vs historical topic detection
+- research artifacts stored outside the prompt
+- trusted-source syllabus refresh
 
-## v0.6 — Media intelligence
+## v0.8 — Multimodal learning
 
-- local video/audio ingestion
-- Gemini 3.5 Transcribe or another STT adapter
-- timestamped speaker-aware transcripts
-- slide/image extraction
-- multimodal evidence retrieval
+- local audio/video ingestion
+- timestamped speech-to-text
+- slide and figure extraction
+- equation-aware evidence
+- multimodal embeddings
+- frame / audio / page citations
+
+## Later
+
+- explicit work-item leases for multiple workers
+- optional MCP tool server
+- advanced late-interaction reranking
+- graph communities / global search
+- model-provider adapters for multiple frontier vendors

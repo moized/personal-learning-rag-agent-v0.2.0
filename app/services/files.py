@@ -33,7 +33,7 @@ def save_upload(file: UploadFile) -> tuple[Path, str]:
 
 def save_text_content(name: str, text: str) -> tuple[Path, str]:
     filename = safe_filename(name)
-    if Path(filename).suffix.lower() not in {".txt", ".md", ".srt", ".vtt"}:
+    if Path(filename).suffix.lower() not in {".txt", ".md", ".srt", ".vtt", ".pptx"}:
         filename = f"{filename}.txt"
     target = settings.upload_path / filename
     if target.exists():

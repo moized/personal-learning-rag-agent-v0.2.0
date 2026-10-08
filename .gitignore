@@ -9,3 +9,7 @@ data/uploads/*
 data/qdrant/*
 !data/uploads/.gitkeep
 !data/qdrant/.gitkeep
+
+web/node_modules/
+web/dist/
+web/.vite/
