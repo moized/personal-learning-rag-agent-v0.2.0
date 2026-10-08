@@ -149,6 +149,7 @@ export default function App(){
   const[error,setError]=useState("")
   const[health,setHealth]=useState<any>()
   const[planRefreshKey,setPlanRefreshKey]=useState(0)
+  const[planRegenerateKey,setPlanRegenerateKey]=useState(0)
   const previousJobStates=useRef(new Map<number,string>())
   const refreshSequence=useRef(0)
   const chatOpenSequence=useRef(0)
@@ -265,18 +266,19 @@ export default function App(){
         <div className="header-title"><div className="mobile-brand"><span className="brand-mark"><Sparkles size={16}/></span>LearnOS</div><h1>{view==="chat"?"Chat":view==="plan"?"Study plan":view==="learn"?"Practice":"Your library"}</h1><div className="mobile-course-control"><select aria-label="Choose course" className="course-select" value={courseId||""} onChange={event=>setCourseId(event.target.value?Number(event.target.value):undefined)}><option value="">All sources</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}</select><button className="text-link" onClick={()=>void createCourse()}><Plus size={14}/>Course</button></div></div>
         <div className="header-actions">
           {activeJobs.length>0&&<Badge><LoaderCircle size={13}/>{activeJobs.length} processing</Badge>}
-          <button className="icon-button" aria-label="Refresh" title="Refresh" onClick={()=>void refresh()}><RefreshCw size={16}/></button>
+          <button className="icon-button" aria-label="Refresh" title="Refresh" onClick={()=>{void refresh();if(view==="plan")setPlanRegenerateKey(key=>key+1)}}><RefreshCw size={16}/></button>
           <Button onClick={()=>setAddOpen(true)}><Plus size={16}/><span>Add source</span></Button>
         </div>
       </header>
       {error&&<div className="global-error" role="alert">{error}</div>}
-      {view==="chat"?<ChatView messages={messages} busy={busy} activeJobs={activeJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} send={sendMessage} addSource={()=>setAddOpen(true)} courseSelected={courseId!==undefined}/>:view==="learn"?<LearnView courseId={courseId}/>:view==="plan"?<StudyPlanView courseId={courseId} refreshKey={planRefreshKey} addSource={()=>setAddOpen(true)}/>:<LibraryView sources={sources} courses={courses} jobs={currentJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} refresh={refresh} addSource={()=>setAddOpen(true)}/>}
+      {view==="chat"?<ChatView messages={messages} busy={busy} activeJobs={activeJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} send={sendMessage} addSource={()=>setAddOpen(true)} courseSelected={courseId!==undefined}/>:view==="learn"?<LearnView courseId={courseId}/>:view==="plan"?<StudyPlanView courseId={courseId} refreshKey={planRefreshKey} regenerateKey={planRegenerateKey} addSource={()=>setAddOpen(true)}/>:<LibraryView sources={sources} courses={courses} jobs={currentJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} refresh={refresh} addSource={()=>setAddOpen(true)}/>}
     </main>
     {addOpen&&<AddSourceDialog courseId={courseId} courses={courses} close={()=>setAddOpen(false)} refresh={refresh}/>}
   </div>
 }
 
-function StudyPlanView({courseId,refreshKey,addSource}:{courseId?:number;refreshKey:number;addSource:()=>void}){
+function StudyPlanView({courseId,refreshKey,regenerateKey,addSource}:{courseId?:number;refreshKey:number;regenerateKey:number;addSource:()=>void}){
+  const handledRegenerate=useRef(regenerateKey)
   const[syllabus,setSyllabus]=useState("")
   const[relationshipInfo,setRelationshipInfo]=useState<PlanRelationships>({sources:[],cross_paths:[],shared_foundations:[]})
   const[topic,setTopic]=useState("")
@@ -289,7 +291,7 @@ function StudyPlanView({courseId,refreshKey,addSource}:{courseId?:number;refresh
   const[completedTopics,setCompletedTopics]=useState<Set<string>>(new Set())
   const[busy,setBusy]=useState(false)
   const[error,setError]=useState("")
-  useEffect(()=>{let current=true;setSyllabus("");setRelationshipInfo({sources:[],cross_paths:[],shared_foundations:[]});setPack(null);setTopicId(undefined);setTopic("");setBusy(true);setError("");Promise.all([api.syllabus(courseId),api.studyProgress(courseId)]).then(([plan,progress])=>{if(!current)return;setSyllabus(plan.syllabus||"");setRelationshipInfo(normalizePlanRelationships(plan.source_relationships));setPlanNodes((plan.nodes||[]).map(node=>({id:node.id,parentId:node.parent_id||"",pathId:node.path_id||"main",kind:node.type,topic:node.title,purpose:node.metadata?.purpose||"",prerequisites:node.metadata?.prerequisites||"",groups:Array.isArray(node.metadata?.source_groups)?node.metadata.source_groups:String(node.metadata?.source_groups||"").split(",").map(s=>s.trim()).filter(Boolean),why:node.metadata?.why_included||"",enables:node.metadata?.enables||"",sourceIds:Array.isArray(node.metadata?.source_ids)?node.metadata.source_ids:[],sourceRoles:Array.isArray(node.metadata?.source_roles)?node.metadata.source_roles:[],confidence:node.metadata?.topic_merge_confidence||0})));setCompletedTopics(new Set(progress.completed_topics.map(normalizedTopic)))}).catch(e=>{if(current)setError(e instanceof Error?e.message:"Could not load your study plan")}).finally(()=>{if(current)setBusy(false)});return()=>{current=false}},[courseId,refreshKey])
+  useEffect(()=>{let current=true;setSyllabus("");setRelationshipInfo({sources:[],cross_paths:[],shared_foundations:[]});setPack(null);setTopicId(undefined);setTopic("");setBusy(true);setError("");const regenerate=regenerateKey!==handledRegenerate.current;handledRegenerate.current=regenerateKey;Promise.all([api.syllabus(courseId,regenerate),api.studyProgress(courseId)]).then(([plan,progress])=>{if(!current)return;setSyllabus(plan.syllabus||"");setRelationshipInfo(normalizePlanRelationships(plan.source_relationships));setPlanNodes((plan.nodes||[]).map(node=>({id:node.id,parentId:node.parent_id||"",pathId:node.path_id||"main",kind:node.type,topic:node.title,purpose:node.metadata?.purpose||"",prerequisites:node.metadata?.prerequisites||"",groups:Array.isArray(node.metadata?.source_groups)?node.metadata.source_groups:String(node.metadata?.source_groups||"").split(",").map(s=>s.trim()).filter(Boolean),why:node.metadata?.why_included||"",enables:node.metadata?.enables||"",sourceIds:Array.isArray(node.metadata?.source_ids)?node.metadata.source_ids:[],sourceRoles:Array.isArray(node.metadata?.source_roles)?node.metadata.source_roles:[],confidence:node.metadata?.topic_merge_confidence||0})));setCompletedTopics(new Set(progress.completed_topics.map(normalizedTopic)))}).catch(e=>{if(current)setError(e instanceof Error?e.message:"Could not load your study plan")}).finally(()=>{if(current)setBusy(false)});return()=>{current=false}},[courseId,refreshKey,regenerateKey])
   const makePack=async(event:FormEvent)=>{event.preventDefault();if(!topic.trim())return;setBusy(true);setError("");try{const result=await api.exportStudyPack(topic.trim(),courseId,tutor,maxInputTokens,topicId);setPack(result)}catch(e){setError(e instanceof Error?e.message:"Could not prepare study pack")}finally{setBusy(false)}}
   const outline=planNodes
   const topicOptions=outline.filter(item=>item.kind==="study").map(item=>item.topic)

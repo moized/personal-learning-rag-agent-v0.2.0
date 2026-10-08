@@ -748,15 +748,16 @@ def study(req: StudyRequest):
 
 
 @app.get("/syllabus")
-def syllabus(course_id: int | None = None):
+def syllabus(course_id: int | None = None, regenerate: bool = False):
+    """Return the cached plan, or rebuild it when sources changed or `regenerate` is set."""
     scope_key = f"course:{course_id}" if course_id is not None else "all"
     # Frontend navigation, query refreshes, and multiple tabs can request the same
     # stale plan at once. Build it once per scope; other callers read the result.
     with _study_plan_lock(scope_key):
-        return _get_or_build_syllabus(course_id, scope_key)
+        return _get_or_build_syllabus(course_id, scope_key, force=regenerate)
 
 
-def _get_or_build_syllabus(course_id: int | None, scope_key: str):
+def _get_or_build_syllabus(course_id: int | None, scope_key: str, force: bool = False):
     with session_scope() as db:
         sources_query = select(Source).where(Source.status == "done").order_by(Source.id)
         if course_id is not None:
@@ -768,7 +769,7 @@ def _get_or_build_syllabus(course_id: int | None, scope_key: str):
                 revisions.append(("course", course_revision.id, course_revision.updated_at.isoformat() if course_revision.updated_at else "", course_revision.outline or ""))
         revision = hashlib.sha256(json.dumps(revisions).encode()).hexdigest()
         plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope_key)).scalar_one_or_none()
-        if plan and plan.revision == revision:
+        if plan and plan.revision == revision and not force:
             nodes = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
             try:
                 saved_relationships = json.loads(plan.relationships_json or "{}")
