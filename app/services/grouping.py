@@ -93,7 +93,10 @@ def extract_group_concepts(db: Session, ai: AIProvider, group: Group) -> int:
     if not settings.concept_extraction:
         return 0
     rows = db.execute(
-        select(Chunk).where(Chunk.group_id == group.id, Chunk.embedding_status == "done").order_by(Chunk.id).limit(24)
+        # Revisit the newest chunks when a source is added to an existing group.
+        # Ascending IDs kept selecting the original source forever, leaving newer
+        # sources without evidence links and therefore out of the generated syllabus.
+        select(Chunk).where(Chunk.group_id == group.id, Chunk.embedding_status == "done").order_by(Chunk.id.desc()).limit(24)
     ).scalars().all()
     if not rows:
         return 0

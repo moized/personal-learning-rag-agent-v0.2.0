@@ -15,6 +15,8 @@ Create 20–50 questions for a tiny corpus first. Label expected supporting chun
 ## Graph metrics
 
 - prerequisite edge precision
+- prerequisite direction and evidence attribution
+- parallel-method classification versus prerequisite classification
 - useful prerequisite traversal rate
 - irrelevant traversal rate
 - cycle detection

@@ -40,7 +40,7 @@ The default path is deterministic. Agentic loops are reserved for cases that nee
 
 ## Knowledge graph
 
-The graph begins with deterministic sequence edges and high-confidence concept relations. Prerequisite edges are directional from prerequisite to dependent concept, enabling backward traversal from a target concept.
+The graph begins with deterministic sequence edges and source-grounded concept relations. Concept relations include prerequisite, parallel, related and contradiction types. A prerequisite edge points from the required concept to the dependent concept. It must cite source chunk evidence; presentation order and optional processing steps are not enough. Parallel edges mark sibling approaches and never impose a learning order. Retrieval and generated learning paths ignore legacy edges that have no provenance.
 
 ## Hierarchy
 

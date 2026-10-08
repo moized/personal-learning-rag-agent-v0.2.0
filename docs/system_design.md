@@ -115,7 +115,9 @@ Eigenvalues
 Linear Algebra
 \`\`\`
 
-The graph is evidence-backed. A relation stores confidence and may later store supporting source references.
+The graph is evidence-backed. Every generated concept relation stores confidence and the source chunk IDs and rationale that support it. An edge without source references is treated as legacy and cannot drive prerequisite traversal or a syllabus.
+
+Prerequisite edges describe required understanding, not presentation order or a possible workflow. Optional preprocessing stays optional. Alternative methods can be recorded as `parallel` edges; they are shown as siblings and never impose a learning order. Syllabus order is topologically sorted from verified prerequisite edges only, with unrelated topics ordered as a display convenience.
 
 ## Grouping and concepts
 
@@ -123,7 +125,7 @@ New leaf embeddings are compared with semantic group centroids. Strong-margin ma
 
 Concept extraction is group-level rather than per chunk to reduce API calls.
 
-After concept extraction, relationship extraction identifies high-confidence prerequisite, related and contradiction edges inside the relevant concept set.
+After concept extraction, relationship extraction compares concepts across the ingested source's semantic groups. It stores high-confidence prerequisite, parallel, related and contradiction edges only when the model cites source chunks that support each relationship.
 
 As the system evolves, concept identity should move beyond exact string equality so the same concept can accumulate evidence from multiple courses.
 

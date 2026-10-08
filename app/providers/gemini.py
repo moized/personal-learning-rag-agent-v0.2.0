@@ -1,7 +1,9 @@
 import json
+import re
 import time
 from typing import Any
 import httpx
+from .base import ProviderAuthenticationError, ProviderQuotaExceededError, ProviderRateLimitError
 
 
 class GeminiProvider:
@@ -34,18 +36,66 @@ class GeminiProvider:
         for attempt in range(self.retry_max + 1):
             try:
                 response = self.client.post(url, headers=headers, json=payload)
-                if response.status_code in (429, 500, 502, 503, 504):
+                if response.status_code in (401, 403):
+                    raise ProviderAuthenticationError(
+                        f"Gemini authentication failed ({response.status_code}): {response.text[:500]}"
+                    )
+                if response.status_code == 429:
+                    if self._is_daily_quota_error(response):
+                        raise ProviderQuotaExceededError(
+                            f"Gemini daily quota exhausted or unavailable: {response.text[:1000]}"
+                        )
+                    last = ProviderRateLimitError(f"Gemini rate limit or quota exceeded: {response.text[:500]}")
+                    if attempt < self.retry_max:
+                        delay = self._rate_limit_delay(response, attempt)
+                        time.sleep(delay)
+                        continue
+                    raise last
+                if response.status_code in (500, 502, 503, 504):
                     last = RuntimeError(f"temporary Gemini error {response.status_code}: {response.text[:500]}")
                     if attempt < self.retry_max:
                         time.sleep(min(2 ** attempt, 30))
                         continue
                 response.raise_for_status()
                 return response.json()
+            except ProviderAuthenticationError:
+                raise
+            except ProviderQuotaExceededError:
+                raise
+            except ProviderRateLimitError:
+                raise
             except Exception as exc:
                 last = exc
                 if attempt < self.retry_max:
                     time.sleep(min(2 ** attempt, 30))
+        if isinstance(last, ProviderRateLimitError):
+            raise last
         raise RuntimeError(str(last))
+
+    @staticmethod
+    def _is_daily_quota_error(response) -> bool:
+        """Detect daily/per-day quota failures from Gemini's structured error details."""
+        body = str(getattr(response, "text", "") or "").lower()
+        return any(marker in body for marker in (
+            "perday", "per_day", "per day", "daily quota", "quota_exceeded",
+            "requestsperday", "tokensperday", "daily limit",
+        ))
+
+    @staticmethod
+    def _rate_limit_delay(response, attempt: int) -> float:
+        """Honor Gemini/HTTP retry hints and use exponential backoff otherwise."""
+        headers = getattr(response, "headers", {}) or {}
+        retry_after = headers.get("Retry-After") or headers.get("retry-after")
+        if retry_after:
+            try:
+                return min(120.0, max(1.0, float(retry_after)))
+            except (TypeError, ValueError):
+                pass
+        body = str(getattr(response, "text", "") or "")
+        match = re.search(r"retry(?:ing)? in\s+([0-9]+(?:\.[0-9]+)?)\s*s", body, re.IGNORECASE)
+        if match:
+            return min(120.0, max(1.0, float(match.group(1))))
+        return min(30.0, float(2 ** attempt))
 
     def _model_order(self, task: str) -> list[str]:
         # High-value synthesis/planning gets 3.8 first. Background extraction/routing stays cheap.
@@ -83,6 +133,12 @@ class GeminiProvider:
             level = self.reasoning_level if model == self.reasoning_model else self.fast_thinking_level
             try:
                 return self._generate(prompt, model, thinking_level=level)
+            except ProviderAuthenticationError:
+                raise
+            except ProviderQuotaExceededError:
+                raise
+            except ProviderRateLimitError:
+                raise
             except Exception as exc:
                 errors.append(f"{model}: {exc}")
         raise RuntimeError("All Gemini text models failed: " + " | ".join(errors))
@@ -102,9 +158,48 @@ class GeminiProvider:
                     return json.loads(text)
                 except json.JSONDecodeError as exc:
                     errors.append(f"{model}: invalid JSON: {exc}")
+            except ProviderAuthenticationError:
+                raise
+            except ProviderQuotaExceededError:
+                raise
+            except ProviderRateLimitError:
+                raise
             except Exception as exc:
                 errors.append(f"{model}: {exc}")
         raise RuntimeError("All Gemini JSON models failed: " + " | ".join(errors))
+
+    def search_grounded(self, prompt: str) -> dict:
+        """Use Gemini's Google Search grounding for ambiguous source identity only."""
+        errors = []
+        for model in self._model_order("classification"):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            level = self.fast_thinking_level
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "tools": [{"google_search": {}}],
+                "generationConfig": {"thinkingConfig": {"thinkingLevel": level}},
+            }
+            try:
+                response = self._post(url, payload)
+                candidates = response.get("candidates") or []
+                if not candidates:
+                    raise RuntimeError("Gemini search returned no candidates")
+                parts = candidates[0].get("content", {}).get("parts", [])
+                text = "".join(part.get("text", "") for part in parts if isinstance(part, dict))
+                metadata = candidates[0].get("groundingMetadata") or {}
+                citations = []
+                for chunk in metadata.get("groundingChunks", []):
+                    web = chunk.get("web") if isinstance(chunk, dict) else None
+                    if web and web.get("uri"):
+                        citations.append({"title": web.get("title", ""), "url": web["uri"]})
+                return {"text": text, "sources": citations, "queries": metadata.get("webSearchQueries", [])}
+            except ProviderAuthenticationError:
+                raise
+            except ProviderQuotaExceededError:
+                raise
+            except Exception as exc:
+                errors.append(f"{model}: {exc}")
+        raise RuntimeError("Gemini grounded search failed: " + " | ".join(errors))
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:

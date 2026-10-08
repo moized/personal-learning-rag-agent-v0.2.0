@@ -13,7 +13,7 @@ from ..providers.base import AIProvider
 from ..config import settings
 
 
-RELATION_TYPES = {"prerequisite", "related", "contradicts"}
+RELATION_TYPES = {"prerequisite", "parallel", "related", "contradicts"}
 
 
 def add_sequence_relations(db: Session, document_id: int) -> int:
@@ -87,10 +87,28 @@ def prerequisite_chain(
             select(ConceptRelation).where(
                 ConceptRelation.to_concept_id == dependent_id,
                 ConceptRelation.relation_type == "prerequisite",
+                ConceptRelation.evidence_json.is_not(None),
             )
         ).scalars().all()
 
         for relation in relations:
+            if course_id is not None:
+                try:
+                    relation_evidence = json.loads(relation.evidence_json or "{}")
+                    evidence_ids = [int(chunk_id) for chunk_id in relation_evidence.get("chunk_ids", [])]
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                if not evidence_ids:
+                    continue
+                supported_in_course = db.execute(
+                    select(Chunk.id)
+                    .join(Document, Chunk.document_id == Document.id)
+                    .join(Source, Document.source_id == Source.id)
+                    .where(Chunk.id.in_(evidence_ids), Source.course_id == course_id)
+                    .limit(1)
+                ).first()
+                if not supported_in_course:
+                    continue
             prerequisite_id = relation.from_concept_id
             if prerequisite_id in visited:
                 continue
@@ -133,7 +151,10 @@ def prerequisite_evidence_chunks(
     for concept, hop in chain:
         rows = db.execute(
             select(Evidence.chunk_id, Evidence.score)
-            .where(Evidence.concept_id == concept.id)
+            .join(Chunk, Evidence.chunk_id == Chunk.id)
+            .join(Document, Chunk.document_id == Document.id)
+            .join(Source, Document.source_id == Source.id)
+            .where(Evidence.concept_id == concept.id, Chunk.chunk_kind == "leaf", Chunk.embedding_status == "done", Source.status == "done")
             .order_by(Evidence.score.desc())
             .limit(4)
         ).all()
@@ -141,7 +162,7 @@ def prerequisite_evidence_chunks(
             if chunk_id in seen:
                 continue
             chunk = db.get(Chunk, chunk_id)
-            if not chunk or chunk.chunk_kind != "leaf":
+            if not chunk or chunk.chunk_kind != "leaf" or chunk.embedding_status != "done":
                 continue
             if course_id is not None:
                 source = db.execute(
@@ -150,7 +171,7 @@ def prerequisite_evidence_chunks(
                     .join(Chunk, Document.id == Chunk.document_id)
                     .where(Chunk.id == chunk.id)
                 ).scalar_one_or_none()
-                if not source or source.course_id != course_id:
+                if not source or source.course_id != course_id or source.status != "done":
                     continue
             seen.add(chunk.id)
             # Prerequisite evidence is intentionally lower-priority than direct retrieval.
@@ -177,6 +198,7 @@ def _would_create_prerequisite_cycle(
             select(ConceptRelation).where(
                 ConceptRelation.from_concept_id == current,
                 ConceptRelation.relation_type == "prerequisite",
+                ConceptRelation.evidence_json.is_not(None),
             )
         ).scalars().all()
         for relation in relations:
@@ -186,32 +208,58 @@ def _would_create_prerequisite_cycle(
     return False
 
 
-def extract_group_relations(db: Session, ai: AIProvider, group_id: int) -> int:
+def extract_concept_relations(
+    db: Session,
+    ai: AIProvider,
+    concept_ids: set[int],
+    scope_label: str,
+) -> int:
     concepts = db.execute(
-        select(Concept).where(Concept.group_id == group_id).order_by(Concept.canonical_name)
+        select(Concept).where(Concept.id.in_(concept_ids)).order_by(Concept.canonical_name)
     ).scalars().all()
     if len(concepts) < 2 or not settings.concept_relationships:
         return 0
 
     concept_lines = []
     by_name = {}
+    evidence_chunks: dict[int, Chunk] = {}
     for concept in concepts[:40]:
+        evidence_rows = db.execute(
+            select(Evidence, Chunk)
+            .join(Chunk, Evidence.chunk_id == Chunk.id)
+            .where(Evidence.concept_id == concept.id, Chunk.chunk_kind == "leaf")
+            .order_by(Evidence.score.desc(), Chunk.id)
+            .limit(2)
+        ).all()
+        excerpts = []
+        for _evidence, chunk in evidence_rows:
+            evidence_chunks[chunk.id] = chunk
+            excerpt = re.sub(r"\s+", " ", chunk.text).strip()[:700]
+            excerpts.append(f"[chunk:{chunk.id}] {excerpt}")
         concept_lines.append(
             f"- {concept.canonical_name}: {concept.description or ''} | aliases={concept.aliases_json or '[]'}"
+            + (f"\n  Source evidence: {' '.join(excerpts)}" if excerpts else "\n  Source evidence: none")
         )
         by_name[concept.canonical_name.strip().lower()] = concept
 
-    prompt = f"""Identify useful learning relationships among these concepts.
-Only create a prerequisite relation when the FIRST concept is needed to understand or use the SECOND concept.
-Return no relationship merely because topics are related.
-Group: {group_id}
+    prompt = f"""Extract source-supported learning relationships among these concepts.
+Use only the source evidence shown below. Concept descriptions are labels, not proof of a dependency.
+Create a prerequisite edge from the prerequisite to the dependent concept only when the evidence shows that the first concept is required to understand or use the second.
+Do not infer prerequisites from presentation order, a common curriculum, or a possible processing pipeline.
+Optional preprocessing is not a prerequisite: for example, stemming may be used before vectorization, but vectorization or embeddings do not require stemming.
+Different representation methods that solve a similar task (such as sparse frequency vectors and dense semantic embeddings) are parallel approaches, not prerequisites of one another.
+Use "related" for a meaningful connection without a dependency or parallel-method relationship. Use "contradicts" only for a source-supported disagreement.
+Every relationship must cite one or more evidence chunk IDs that directly support that relationship. If the excerpts do not establish a relationship, omit it.
+Concept scope: {scope_label}
 Concepts:
 {chr(10).join(concept_lines)}
 Return JSON with a relationships array. Each relationship must use:
 - from_concept: exact concept name from the list
 - to_concept: exact concept name from the list
-- type: prerequisite, related, or contradicts
+- type: prerequisite, parallel, related, or contradicts
 - confidence: 0 to 1
+- evidence_chunk_ids: one or more chunk IDs shown in the evidence
+- rationale: a short explanation grounded in those chunks
 """
 
     schema = {
@@ -226,8 +274,10 @@ Return JSON with a relationships array. Each relationship must use:
                         "to_concept": {"type": "string"},
                         "type": {"type": "string"},
                         "confidence": {"type": "number"},
+                        "evidence_chunk_ids": {"type": "array", "items": {"type": "integer"}},
+                        "rationale": {"type": "string"},
                     },
-                    "required": ["from_concept", "to_concept", "type", "confidence"],
+                    "required": ["from_concept", "to_concept", "type", "confidence", "evidence_chunk_ids", "rationale"],
                 },
             }
         },
@@ -239,8 +289,27 @@ Return JSON with a relationships array. Each relationship must use:
     except Exception:
         return 0
 
+    concept_ids = {concept.id for concept in by_name.values()}
+    # Legacy graph edges had no source provenance. Remove them before cycle checks
+    # so they cannot block a corrected, evidence-backed edge.
+    legacy_edges = db.execute(
+        select(ConceptRelation).where(
+            ConceptRelation.evidence_json.is_(None),
+            ConceptRelation.from_concept_id.in_(concept_ids),
+            ConceptRelation.to_concept_id.in_(concept_ids),
+        )
+    ).scalars().all()
+    for edge in legacy_edges:
+        db.delete(edge)
+    db.flush()
+
+    relationships = result.get("relationships", [])
+    if not isinstance(relationships, list):
+        relationships = []
     created = 0
-    for item in result.get("relationships", []):
+    for item in relationships:
+        if not isinstance(item, dict):
+            continue
         from_name = str(item.get("from_concept", "")).strip().lower()
         to_name = str(item.get("to_concept", "")).strip().lower()
         rel_type = str(item.get("type", "")).strip().lower()
@@ -250,7 +319,17 @@ Return JSON with a relationships array. Each relationship must use:
         target = by_name.get(to_name)
         if not source or not target:
             continue
-        confidence = max(0.0, min(1.0, float(item.get("confidence", 0.0))))
+        try:
+            evidence_ids = list(dict.fromkeys(int(chunk_id) for chunk_id in item.get("evidence_chunk_ids", [])))
+        except (TypeError, ValueError):
+            continue
+        evidence_ids = [chunk_id for chunk_id in evidence_ids if chunk_id in evidence_chunks]
+        if not evidence_ids:
+            continue
+        try:
+            confidence = max(0.0, min(1.0, float(item.get("confidence", 0.0))))
+        except (TypeError, ValueError):
+            continue
         if confidence < settings.relationship_min_confidence:
             continue
 
@@ -268,6 +347,18 @@ Return JSON with a relationships array. Each relationship must use:
         ).scalar_one_or_none()
         if exists:
             exists.confidence = max(exists.confidence, confidence)
+            try:
+                old_evidence = json.loads(exists.evidence_json or "{}")
+            except json.JSONDecodeError:
+                old_evidence = {}
+            old_ids = old_evidence.get("chunk_ids", []) if isinstance(old_evidence, dict) else []
+            if not isinstance(old_ids, list):
+                old_ids = []
+            exists.evidence_json = json.dumps({
+                "chunk_ids": list(dict.fromkeys([*old_ids, *evidence_ids]))[:8],
+                "rationale": str(item.get("rationale", ""))[:1000],
+                "method": "source-grounded-v1",
+            }, ensure_ascii=False)
             continue
         db.add(
             ConceptRelation(
@@ -275,7 +366,32 @@ Return JSON with a relationships array. Each relationship must use:
                 to_concept_id=target.id,
                 relation_type=rel_type,
                 confidence=confidence,
+                evidence_json=json.dumps({
+                    "chunk_ids": evidence_ids[:8],
+                    "rationale": str(item.get("rationale", ""))[:1000],
+                    "method": "source-grounded-v1",
+                }, ensure_ascii=False),
             )
         )
         created += 1
     return created
+
+
+def extract_group_relations(db: Session, ai: AIProvider, group_id: int) -> int:
+    """Compatibility wrapper for refreshing one semantic group."""
+    concept_ids = set(db.execute(
+        select(Concept.id).where(Concept.group_id == group_id)
+    ).scalars().all())
+    return extract_concept_relations(db, ai, concept_ids, f"semantic group {group_id}")
+
+
+def extract_source_relations(db: Session, ai: AIProvider, source_id: int) -> int:
+    """Extract relations across all groups represented by one ingested source."""
+    concept_ids = set(db.execute(
+        select(Evidence.concept_id)
+        .join(Chunk, Evidence.chunk_id == Chunk.id)
+        .join(Document, Chunk.document_id == Document.id)
+        .where(Document.source_id == source_id, Chunk.chunk_kind == "leaf")
+        .distinct()
+    ).scalars().all())
+    return extract_concept_relations(db, ai, concept_ids, f"source {source_id}")

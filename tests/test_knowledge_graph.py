@@ -22,8 +22,8 @@ def test_prerequisite_chain_walks_backward():
         db.add_all([group, a, b, c])
         db.flush()
         db.add_all([
-            ConceptRelation(from_concept_id=a.id, to_concept_id=b.id, relation_type="prerequisite", confidence=0.9),
-            ConceptRelation(from_concept_id=b.id, to_concept_id=c.id, relation_type="prerequisite", confidence=0.9),
+            ConceptRelation(from_concept_id=a.id, to_concept_id=b.id, relation_type="prerequisite", confidence=0.9, evidence_json='{"chunk_ids": [10]}'),
+            ConceptRelation(from_concept_id=b.id, to_concept_id=c.id, relation_type="prerequisite", confidence=0.9, evidence_json='{"chunk_ids": [11]}'),
         ])
         db.commit()
 

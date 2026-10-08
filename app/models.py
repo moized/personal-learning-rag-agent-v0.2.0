@@ -1,5 +1,5 @@
 from datetime import datetime, UTC
-from sqlalchemy import String, Text, Integer, Float, ForeignKey, UniqueConstraint, DateTime, Index
+from sqlalchemy import String, Text, Integer, Float, ForeignKey, UniqueConstraint, DateTime, Index, CheckConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
@@ -19,6 +19,17 @@ class Course(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class StudyProgress(Base):
+    __tablename__ = "study_progress"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope_key: Mapped[str] = mapped_column(String(80), index=True)
+    topic_key: Mapped[str] = mapped_column(String(500))
+    topic_label: Mapped[str] = mapped_column(String(500))
+    completed: Mapped[bool] = mapped_column(default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    __table_args__ = (UniqueConstraint("scope_key", "topic_key", name="uq_study_progress_scope_topic"),)
+
+
 class Source(Base):
     __tablename__ = "sources"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -27,6 +38,9 @@ class Source(Base):
     uri: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     local_path: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     course_id: Mapped[int | None] = mapped_column(ForeignKey("courses.id"), nullable=True, index=True)
+    assignment_mode: Mapped[str] = mapped_column(String(30), default="explicit_unassigned")
+    assignment_status: Mapped[str] = mapped_column(String(30), default="unassigned")
+    assignment_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     domain_hint: Mapped[str | None] = mapped_column(String(255), nullable=True)
     topic_hint: Mapped[str | None] = mapped_column(String(500), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -155,11 +169,87 @@ class Job(Base):
     task: Mapped[str] = mapped_column(String(50))
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     stage: Mapped[str] = mapped_column(String(50), default="ingest")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     progress_current: Mapped[int] = mapped_column(Integer, default=0)
     progress_total: Mapped[int] = mapped_column(Integer, default=0)
     checkpoint: Mapped[str | None] = mapped_column(String(500), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class StudyPlan(Base):
+    __tablename__ = "study_plans"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    revision: Mapped[str] = mapped_column(String(64))
+    syllabus: Mapped[str] = mapped_column(Text)
+    relationships_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class StudyPlanNode(Base):
+    __tablename__ = "study_plan_nodes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("study_plans.id", ondelete="CASCADE"), index=True)
+    node_id: Mapped[str] = mapped_column(String(100))
+    parent_node_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    node_type: Mapped[str] = mapped_column(String(20))
+    path_id: Mapped[str] = mapped_column(String(100), default="main", index=True)
+    title: Mapped[str] = mapped_column(String(500))
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    __table_args__ = (
+        UniqueConstraint("plan_id", "node_id", name="uq_plan_node"),
+        CheckConstraint("node_type IN ('outline', 'study')", name="ck_study_plan_node_type"),
+    )
+
+
+class SourceRelationship(Base):
+    __tablename__ = "source_relationships"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_a_id: Mapped[int] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), index=True)
+    source_b_id: Mapped[int] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), index=True)
+    source_a_profile_hash: Mapped[str] = mapped_column(String(64))
+    source_b_profile_hash: Mapped[str] = mapped_column(String(64))
+    relation_type: Mapped[str] = mapped_column(String(40))
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    rationale: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    __table_args__ = (
+        UniqueConstraint("source_a_id", "source_b_id", name="uq_source_relationship_pair"),
+        CheckConstraint("relation_type IN ('SAME_COURSE','SAME_LEARNING_PATH','COMPLEMENTARY_RESOURCE','SAME_DOMAIN_DIFFERENT_COURSE','RELATED_BUT_SEPARATE','UNRELATED')", name="ck_source_relationship_type"),
+    )
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    title: Mapped[str] = mapped_column(String(500), default="New chat")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, index=True)
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class MaintenanceJob(Base):
+    __tablename__ = "maintenance_jobs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task: Mapped[str] = mapped_column(String(60))
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    progress_current: Mapped[int] = mapped_column(Integer, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, default=0)
+    checkpoint: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    items_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    errors_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, index=True)

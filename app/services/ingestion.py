@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+from urllib.parse import quote
 import ast
 import json
 import re
@@ -138,19 +139,47 @@ def parse_file(path: Path) -> list[RawDocument]:
         doc = Document(str(path))
         text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
         return [RawDocument(path.name, path.stem, None, text)]
+    if suffix == ".pptx":
+        from pptx import Presentation
+        presentation = Presentation(str(path))
+        docs: list[RawDocument] = []
+        for index, slide in enumerate(presentation.slides, start=1):
+            pieces: list[str] = []
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False):
+                    value = shape.text.strip()
+                    if value:
+                        pieces.append(value)
+                if getattr(shape, "has_table", False):
+                    for row in shape.table.rows:
+                        cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                        if cells:
+                            pieces.append(" | ".join(cells))
+            text = "\n\n".join(pieces)
+            if text.strip():
+                docs.append(RawDocument(f"{path.name}:slide{index}", path.stem, f"slide {index}", text))
+        return docs
     raise ValueError(f"Unsupported file type: {suffix}")
+
+
+YOUTUBE_HOSTS = {
+    "youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+    "youtube-nocookie.com", "www.youtube-nocookie.com",
+}
 
 
 def youtube_video_id(url: str) -> str | None:
     parsed = urlparse(url)
-    if parsed.hostname in {"youtu.be"}:
-        return parsed.path.strip("/").split("/")[0] or None
-    if parsed.hostname and "youtube.com" in parsed.hostname:
+    host = (parsed.hostname or "").lower()
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/").split("/")[0]
+        return video_id if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) else None
+    if host in YOUTUBE_HOSTS:
         q = parse_qs(parsed.query).get("v")
         if q:
-            return q[0]
+            return q[0] if re.fullmatch(r"[A-Za-z0-9_-]{11}", q[0]) else None
         m = re.search(r"/(?:shorts|embed)/([^/?]+)", parsed.path)
-        return m.group(1) if m else None
+        return m.group(1) if m and re.fullmatch(r"[A-Za-z0-9_-]{11}", m.group(1)) else None
     return None
 
 
@@ -158,7 +187,23 @@ def youtube_is_playlist(url: str) -> bool:
     return bool(parse_qs(urlparse(url).query).get("list"))
 
 
+def canonical_youtube_url(url: str) -> str:
+    """Remove video tracking parameters so equivalent YouTube links deduplicate."""
+    parsed = urlparse(url)
+    if (parsed.hostname or "").lower() not in YOUTUBE_HOSTS:
+        return url
+    playlist_id = parse_qs(parsed.query).get("list", [None])[0]
+    if playlist_id:
+        return f"https://www.youtube.com/playlist?list={quote(playlist_id, safe='')}"
+    video_id = youtube_video_id(url)
+    if video_id:
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return url
+
+
 def list_youtube_videos(url: str) -> list[tuple[str, str]]:
+    if (urlparse(url).hostname or "").lower() not in YOUTUBE_HOSTS:
+        raise ValueError("URL must be a YouTube video or playlist URL")
     if not youtube_is_playlist(url):
         vid = youtube_video_id(url)
         if not vid:
@@ -168,7 +213,10 @@ def list_youtube_videos(url: str) -> list[tuple[str, str]]:
         from yt_dlp import YoutubeDL
         with YoutubeDL({"quiet": True, "extract_flat": True, "skip_download": True}) as ydl:
             info = ydl.extract_info(url, download=False)
-        return [(entry["id"], entry.get("title") or entry["id"]) for entry in info.get("entries", []) if entry and entry.get("id")]
+        videos = [(entry["id"], entry.get("title") or entry["id"]) for entry in (info or {}).get("entries", []) if entry and entry.get("id")]
+        if not videos:
+            raise ValueError("Playlist contains no accessible videos")
+        return videos
     except Exception as exc:
         raise RuntimeError(f"Playlist expansion failed: {exc}") from exc
 

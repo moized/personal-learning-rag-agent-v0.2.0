@@ -1,177 +1,460 @@
-import {useEffect,useMemo,useRef,useState,type ReactNode} from "react"
-import {BookOpen,BrainCircuit,FileText,FolderOpen,GraduationCap,Library,LoaderCircle,Plus,RefreshCw,Sparkles,UploadCloud,X} from "lucide-react"
-import {api,type Course,type Job,type Source,type Stats} from "./lib/api"
+import {useEffect,useMemo,useRef,useState,type FormEvent,type KeyboardEvent,type ReactNode} from "react"
+import {Check,Copy,FileText,FolderOpen,GraduationCap,Library,LoaderCircle,MessageSquare,Paperclip,Plus,RefreshCw,Send,Sparkles,Trash2,UploadCloud,X} from "lucide-react"
+import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type Source,type StudyPackExport} from "./lib/api"
 
-type View="home"|"library"|"study"
-type Mode="files"|"paste"|"youtube"
-const nav=[["home","Home",BrainCircuit],["library","Library",Library],["study","Study",GraduationCap]] as const
+type View="chat"|"library"|"plan"
+type ChatMessage={id:string;role:"user"|"assistant";content:string;evidenceCount?:number;supplementalSourceCount?:number;supplementalSources?:string[];retryJobId?:number}
+type AddMode="file"|"youtube"|"paste"
+type OutlineTopic={id:string;parentId:string;pathId:string;kind:"outline"|"study";topic:string;purpose:string;prerequisites:string;groups:string[];why:string;enables:string;sourceIds:number[];sourceRoles:string[];confidence:number}
+type PlanRelationships={sources:any[];cross_paths:any[];shared_foundations:string[]}
+function normalizePlanRelationships(value:unknown):PlanRelationships{
+  const empty:PlanRelationships={sources:[],cross_paths:[],shared_foundations:[]}
+  if(Array.isArray(value))return {...empty,sources:value}
+  if(!value||typeof value!=="object")return empty
+  const data=value as Record<string,unknown>
+  return {sources:Array.isArray(data.sources)?data.sources:[],cross_paths:Array.isArray(data.cross_paths)?data.cross_paths:[],shared_foundations:Array.isArray(data.shared_foundations)?data.shared_foundations.filter((item):item is string=>typeof item==="string"):[]}
+}
 
-function Button({children,onClick,variant="primary",disabled=false}:{children:ReactNode;onClick?:()=>void;variant?:"primary"|"outline"|"ghost";disabled?:boolean}){
-  return <button className={"btn "+variant} onClick={onClick} disabled={disabled}>{children}</button>
+function Button({children,onClick,variant="primary",disabled=false,type="button"}:{children:ReactNode;onClick?:()=>void;variant?:"primary"|"outline"|"ghost";disabled?:boolean;type?:"button"|"submit"}){
+  return <button className={`btn ${variant}`} type={type} onClick={onClick} disabled={disabled}>{children}</button>
 }
 function Badge({children}:{children:ReactNode}){return <span className="badge">{children}</span>}
-function progressValue(s:string){const m=s.match(/(\d+)\/(\d+)/);return m?Math.min(100,Math.round(Number(m[1])/Math.max(1,Number(m[2]))*100)):6}
+function stageLabel(stage:string){return ({structure:"Preparing source",transcript:"Getting transcript",index:"Indexing content",organize:"Organizing notes",concepts:"Finding key ideas",graph:"Connecting ideas",done:"Ready"} as Record<string,string>)[stage]||"Working"}
+function statusLabel(status:string){return status==="done"?"Ready":status==="failed"?"Needs attention":status==="retrying"?"Retrying":status==="running"||status==="processing"?"In progress":"Queued"}
+function sourceTitle(source:Pick<Source,"name"|"source_type">|Pick<Job,"source_name"|"source_type"|"source_uri">){
+  const name="name" in source?source.name:source.source_name
+  if(source.source_type!=="youtube")return name||"Source"
+  const uri="source_uri" in source?source.source_uri:name
+  try{const url=new URL(uri||"");const playlist=url.searchParams.get("list");const id=url.hostname==="youtu.be"?url.pathname.slice(1):url.searchParams.get("v");return playlist?`YouTube playlist · ${playlist}`:id?`YouTube video · ${id}`:"YouTube source"}catch{return "YouTube source"}
+}
+function sourceKey(job:Job){
+  if(job.source_type!=="youtube")return `source:${job.source_id}`
+  try{const url=new URL(job.source_uri||job.source_name||"");const playlist=url.searchParams.get("list");const id=url.hostname==="youtu.be"?url.pathname.slice(1):url.searchParams.get("v");return playlist?`playlist:${playlist}`:id?`video:${id}`:`youtube:${url.hostname}${url.pathname}`}catch{return `source:${job.source_id}`}
+}
+function latestJobs(jobs:Job[]){const keys=new Set<string>();return jobs.filter(job=>{const key=sourceKey(job);if(keys.has(key))return false;keys.add(key);return true})}
+function newId(){return globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random()}`}
+function normalizedTopic(topic:string){return topic.trim().toLowerCase().replace(/\s+/g," ")}
+function parseOutline(markdown:string):OutlineTopic[]{
+  const rows=markdown.split("\n").filter(line=>/^\s*\|/.test(line))
+  if(!rows.length)return []
+  const cells=(row:string)=>row.trim().replace(/^\||\|$/g,"").split("|").map(value=>value.trim())
+  const header=cells(rows[0]).map(value=>value.toLowerCase())
+  const column=(...names:string[])=>{const index=header.findIndex(value=>names.includes(value));return index}
+  const topicCol=column("topic","title")
+  return rows.slice(1).filter(line=>!/^\s*\|?\s*:?-{3,}/.test(line.trim())).flatMap(line=>{
+    const values=cells(line)
+    const value=(index:number,fallback:number)=>index>=0?values[index]||"":fallback>=0?values[fallback]||"":""
+    const topic=value(topicCol,1)
+    if(!topic||topic.toLowerCase()==="topic")return []
+    const groups=value(column("source groups","groups"),5).split(",").map(item=>item.trim()).filter(item=>item&&item.toLowerCase()!=="none"&&item!=="—")
+    const kind=value(column("type","kind"),-1).toLowerCase()==="outline"?"outline":"study"
+    return [{id:value(column("id"),0)||topic,parentId:value(column("parent id","parent"),-1),pathId:"main",kind,topic:topic.replace(/\\\|/g,"|"),purpose:value(column("purpose"),2),prerequisites:value(column("prerequisites"),3),groups:groups.length?groups:["Other topics"],why:"",enables:"",sourceIds:[],sourceRoles:[],confidence:0}]
+  })
+}
+
+function inlineMarkdown(text:string,keyPrefix:string):ReactNode[]{
+  const nodes:ReactNode[]=[]
+  const pattern=/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<]+)/g
+  let last=0,match:RegExpExecArray|null,index=0
+  while((match=pattern.exec(text))){
+    if(match.index>last)nodes.push(text.slice(last,match.index))
+    const token=match[0],key=`${keyPrefix}-${index++}`
+    if(token.startsWith("`"))nodes.push(<code key={key}>{token.slice(1,-1)}</code>)
+    else if(token.startsWith("**"))nodes.push(<strong key={key}>{token.slice(2,-2)}</strong>)
+    else if(token.startsWith("*"))nodes.push(<em key={key}>{token.slice(1,-1)}</em>)
+    else if(token.startsWith("[")){const parsed=token.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);nodes.push(parsed?<a key={key} href={parsed[2]} target="_blank" rel="noreferrer">{parsed[1]}</a>:token)}
+    else {const trailing=token.match(/[.,!?;:]+$/)?.[0]||"";const href=trailing?token.slice(0,-trailing.length):token;nodes.push(<span key={key}><a href={href} target="_blank" rel="noreferrer">{href}</a>{trailing}</span>)}
+    last=pattern.lastIndex
+  }
+  if(last<text.length)nodes.push(text.slice(last))
+  return nodes
+}
+
+function MarkdownText({text}:{text:string}){
+  const lines=text.replace(/\r\n?/g,"\n").split("\n")
+  const blocks:ReactNode[]=[]
+  let cursor=0,blockKey=0
+  const isBlockStart=(line:string)=>/^\s*(?:#{1,4}\s|```|>\s?|[-*+]\s+|\d+[.)]\s+|\|.*\|\s*$|---+\s*$)/.test(line)
+  while(cursor<lines.length){
+    const line=lines[cursor]
+    if(!line.trim()){cursor++;continue}
+    const key=`md-${blockKey++}`
+    if(line.trim().startsWith("```")){
+      const language=line.trim().slice(3).trim();cursor++
+      const code:string[]=[]
+      while(cursor<lines.length&&!lines[cursor].trim().startsWith("```"))code.push(lines[cursor++])
+      if(cursor<lines.length)cursor++
+      blocks.push(<pre key={key}><code className={language?`language-${language}`:undefined}>{code.join("\n")}</code></pre>);continue
+    }
+    const heading=line.match(/^\s*(#{1,4})\s+(.+)$/)
+    if(heading){const content=inlineMarkdown(heading[2],key);const level=heading[1].length;blocks.push(level===1||level===2?<h2 key={key}>{content}</h2>:<h3 key={key}>{content}</h3>);cursor++;continue}
+    if(/^\s*---+\s*$/.test(line)){blocks.push(<hr key={key}/>);cursor++;continue}
+    if(/^\s*\|.*\|\s*$/.test(line)){
+      const tableLines:string[]=[]
+      while(cursor<lines.length&&/^\s*\|.*\|\s*$/.test(lines[cursor]))tableLines.push(lines[cursor++])
+      const cells=(row:string)=>row.trim().replace(/^\||\|$/g,"").split("|").map(cell=>cell.trim())
+      const header=cells(tableLines[0]||"")
+      const hasDivider=tableLines[1]&&/^\s*\|?\s*:?-{3,}/.test(tableLines[1])
+      const bodyRows=tableLines.slice(hasDivider?2:1).map(cells)
+      blocks.push(<div className="markdown-table-wrap" key={key}><table><thead><tr>{header.map((cell,i)=><th key={i}>{inlineMarkdown(cell,`${key}-h${i}`)}</th>)}</tr></thead><tbody>{bodyRows.map((row,r)=><tr key={r}>{header.map((_,i)=><td key={i}>{inlineMarkdown(row[i]||"",`${key}-r${r}c${i}`)}</td>)}</tr>)}</tbody></table></div>);continue
+    }
+    if(/^\s*>/.test(line)){
+      const quote:string[]=[]
+      while(cursor<lines.length&&/^\s*>/.test(lines[cursor]))quote.push(lines[cursor++].replace(/^\s*>\s?/,""))
+      blocks.push(<blockquote key={key}>{quote.map((part,i)=><p key={i}>{inlineMarkdown(part,`${key}-${i}`)}</p>)}</blockquote>);continue
+    }
+    const listMatch=line.match(/^\s*(?:[-*+]\s+|\d+[.)]\s+)/)
+    if(listMatch){
+      const ordered=/^\s*\d/.test(line),items:string[]=[]
+      const listPattern=ordered?/^\s*\d+[.)]\s+/:/^\s*[-*+]\s+/
+      while(cursor<lines.length){const item=lines[cursor].match(listPattern);if(!item)break;items.push(lines[cursor++].replace(listPattern,""))}
+      const List=ordered?"ol":"ul"
+      blocks.push(<List key={key}>{items.map((item,i)=><li key={i}>{inlineMarkdown(item,`${key}-${i}`)}</li>)}</List>);continue
+    }
+    const paragraph=[line.trim()];cursor++
+    while(cursor<lines.length&&lines[cursor].trim()&&!isBlockStart(lines[cursor]))paragraph.push(lines[cursor++].trim())
+    blocks.push(<p key={key}>{paragraph.map((part,i)=><span key={i}>{i>0&&" "}{inlineMarkdown(part,`${key}-${i}`)}</span>)}</p>)
+  }
+  return <div className="markdown-body">{blocks}</div>
+}
+
+function CopyAnswer({text}:{text:string}){
+  const[copied,setCopied]=useState(false)
+  const timer=useRef<number|undefined>(undefined)
+  useEffect(()=>()=>window.clearTimeout(timer.current),[])
+  const copy=async()=>{
+    try{
+      if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text)
+      else{const area=document.createElement("textarea");area.value=text;area.style.position="fixed";area.style.opacity="0";document.body.appendChild(area);area.select();const ok=document.execCommand("copy");area.remove();if(!ok)throw new Error("Clipboard unavailable")}
+      setCopied(true);timer.current=window.setTimeout(()=>setCopied(false),1800)
+    }catch{setCopied(false)}
+  }
+  return <button type="button" className="copy-answer" onClick={()=>void copy()} aria-label={copied?"Answer copied":"Copy answer"} title={copied?"Copied":"Copy answer"}>{copied?<Check size={14}/>:<Copy size={14}/>}<span>{copied?"Copied":"Copy"}</span></button>
+}
 
 export default function App(){
-  const[view,setView]=useState<View>("home")
+  const[view,setView]=useState<View>("plan")
   const[courses,setCourses]=useState<Course[]>([])
   const[courseId,setCourseId]=useState<number>()
   const[sources,setSources]=useState<Source[]>([])
   const[jobs,setJobs]=useState<Job[]>([])
-  const[stats,setStats]=useState<Stats|null>(null)
-  const[health,setHealth]=useState<any>()
-  const[add,setAdd]=useState(false)
+  const[messages,setMessages]=useState<ChatMessage[]>([])
+  const[conversations,setConversations]=useState<ConversationSummary[]>([])
+  const[conversationId,setConversationId]=useState<string>()
+  const conversationIdRef=useRef<string|undefined>(undefined)
+  const[busy,setBusy]=useState(false)
+  const[retryingJob,setRetryingJob]=useState<number|null>(null)
+  const[addOpen,setAddOpen]=useState(false)
   const[error,setError]=useState("")
-  const createCourse=async()=>{
-    const name=window.prompt("Course name")?.trim()
-    if(!name)return
-    try{
-      setError("")
-      const created=await api.createCourse({name})
-      setCourses(prev=>[...prev,created])
-      setCourseId(created.id)
-    }catch(e){setError(e instanceof Error?e.message:"Could not create course")}
-  }
+  const[health,setHealth]=useState<any>()
+  const[planRefreshKey,setPlanRefreshKey]=useState(0)
+  const previousJobStates=useRef(new Map<number,string>())
+  const refreshSequence=useRef(0)
+  const chatOpenSequence=useRef(0)
+
   const refresh=async()=>{
+    const requestId=++refreshSequence.current
     try{
       setError("")
-      const[c,j,h]=await Promise.all([api.courses(),api.jobs(),api.health()])
-      setCourses(c);setJobs(j);setHealth(h)
-      if(courseId){
-        const[s,st]=await Promise.all([api.sources(courseId),api.stats(courseId)])
-        setSources(s);setStats(st)
-      }else{
-        setSources(await api.sources())
-        setStats(null)
-      }
-    }catch(e){setError(e instanceof Error?e.message:"Backend unavailable")}
+      const[c,j,h,s]=await Promise.all([api.courses(),api.jobs(),api.health(),api.sources(courseId)])
+      if(requestId!==refreshSequence.current)return
+      const terminal=new Set(["done","failed"])
+      const becameReady=j.some(job=>previousJobStates.current.get(job.id)!==undefined&&
+        !terminal.has(previousJobStates.current.get(job.id)!)&&terminal.has(job.status))
+      previousJobStates.current=new Map(j.map(job=>[job.id,job.status]))
+      setCourses(c);setJobs(j);setHealth(h);setSources(s)
+      if(becameReady)setPlanRefreshKey(key=>key+1)
+    }catch(e){setError(e instanceof Error?e.message:"Could not connect to LearnOS")}
   }
-  useEffect(()=>{refresh()},[courseId])
+  useEffect(()=>{refreshSequence.current++;void refresh()},[courseId])
+  useEffect(()=>{let current=true;api.conversations().then(async loaded=>{if(!current)return;let rows=loaded;if(!rows.length&&!localStorage.getItem("learnos.chat-migration-v1")){try{const old=JSON.parse(localStorage.getItem("learnos.current-chat")||"[]") as ChatMessage[];if(old.length){const created=await api.createConversation();for(const message of old)await api.addConversationMessage(created.id,{role:message.role,content:message.content},{evidenceCount:message.evidenceCount,supplementalSourceCount:message.supplementalSourceCount,supplementalSources:message.supplementalSources,retryJobId:message.retryJobId});localStorage.setItem("learnos.chat-migration-v1","done");rows=await api.conversations()}}catch{setError("Your earlier chat is still stored in this browser; LearnOS could not migrate it yet.")}}if(!current)return;setConversations(rows);const saved=localStorage.getItem("learnos.active-conversation");const selected=rows.find(row=>row.id===saved)||rows[0];if(selected){conversationIdRef.current=selected.id;setConversationId(selected.id);const full=await api.getConversation(selected.id);if(current)setMessages(full.messages.map(m=>({id:String(m.id),role:m.role,content:m.content,evidenceCount:m.metadata?.evidenceCount,supplementalSourceCount:m.metadata?.supplementalSourceCount,supplementalSources:m.metadata?.supplementalSources,retryJobId:m.metadata?.retryJobId})))}}).catch(e=>setError(e instanceof Error?e.message:"Could not load conversations"));return()=>{current=false}},[])
+  useEffect(()=>{if(conversationId)localStorage.setItem("learnos.active-conversation",conversationId)},[conversationId])
+  const currentJobs=useMemo(()=>latestJobs(jobs),[jobs])
+  const activeJobs=currentJobs.filter(job=>["queued","running","retrying"].includes(job.status))
+  const failedJobs=currentJobs.filter(job=>job.status==="failed")
   useEffect(()=>{
-    if(!jobs.some(j=>j.status==="queued"||j.status==="running"))return
-    const t=setInterval(refresh,3500)
-    return()=>clearInterval(t)
-  },[jobs,courseId])
-  const course=useMemo(()=>courses.find(c=>c.id===courseId),[courses,courseId])
-  const active=jobs.filter(j=>j.status==="queued"||j.status==="running")
-  return <div className="shell">
-    <aside className="rail">
-      <div className="brand"><div className="mark"><Sparkles size={15}/></div><span>LearnOS</span></div>
-      <div className="nav">{nav.map(([id,label,Icon])=><button key={id} className={view===id?"active":""} onClick={()=>setView(id)}><Icon size={17}/><span>{label}</span></button>)}</div>
-      <div className="rail-foot"><Button onClick={()=>setAdd(true)}><Plus size={16}/><span>Add</span></Button><small className="muted" style={{padding:"0 9px"}}>{health?.llm?"AI configured":"Local fallback"}</small></div>
+    if(!activeJobs.length)return
+    const timer=window.setInterval(()=>void refresh(),3000)
+    return()=>window.clearInterval(timer)
+  },[activeJobs.length,courseId])
+
+  const appendAssistant=(content:string,extra:Partial<ChatMessage>={})=>{const message:ChatMessage={id:newId(),role:"assistant",content,...extra};setMessages(previous=>[...previous,message]);const activeId=conversationIdRef.current;if(activeId)void api.addConversationMessage(activeId,{role:"assistant",content},{evidenceCount:extra.evidenceCount,supplementalSourceCount:extra.supplementalSourceCount,supplementalSources:extra.supplementalSources,retryJobId:extra.retryJobId}).then(()=>api.conversations().then(setConversations)).catch(()=>{})}
+  const newChat=async()=>{const requestId=++chatOpenSequence.current;try{const created=await api.createConversation();if(requestId!==chatOpenSequence.current)return;conversationIdRef.current=created.id;setConversationId(created.id);setMessages([]);setConversations(rows=>[{id:created.id,title:created.title,created_at:new Date().toISOString(),updated_at:new Date().toISOString()},...rows]);setView("chat")}catch(e){setError(e instanceof Error?e.message:"Could not create a conversation")}}
+  const openChat=async(id:string)=>{const requestId=++chatOpenSequence.current;try{const full=await api.getConversation(id);if(requestId!==chatOpenSequence.current)return;conversationIdRef.current=id;setConversationId(id);setMessages(full.messages.map(m=>({id:String(m.id),role:m.role,content:m.content,evidenceCount:m.metadata?.evidenceCount,supplementalSourceCount:m.metadata?.supplementalSourceCount,supplementalSources:m.metadata?.supplementalSources,retryJobId:m.metadata?.retryJobId})));setView("chat")}catch(e){if(requestId===chatOpenSequence.current)setError(e instanceof Error?e.message:"Could not open conversation")}}
+  const removeChat=async(id:string)=>{if(!window.confirm("Delete this conversation and its messages?"))return;try{await api.deleteConversation(id);const rows=await api.conversations();setConversations(rows);if(conversationIdRef.current===id){conversationIdRef.current=undefined;setConversationId(undefined);setMessages([]);if(rows[0])await openChat(rows[0].id)}}catch(e){setError(e instanceof Error?e.message:"Could not delete conversation")}}
+  const retryJob=async(id:number)=>{
+    setRetryingJob(id);setError("")
+    try{await api.retryJob(id);await refresh();appendAssistant("I’ve restarted that source from its saved progress.")}
+    catch(e){setError(e instanceof Error?e.message:"Could not retry this source")}
+    finally{setRetryingJob(null)}
+  }
+  const createCourse=async()=>{
+    const name=window.prompt("Name this course")?.trim()
+    if(!name)return
+    try{const created=await api.createCourse({name});await refresh();setCourseId(created.id)}catch(e){setError(e instanceof Error?e.message:"Could not create course")}
+  }
+  const sendMessage=async(text:string,files:File[],retrievalScope:"space_only"|"space_and_related"|"all_sources"="space_only")=>{
+    const clean=text.trim()
+    if((!clean&&!files.length)||busy)return
+    const messageText=[clean,...files.map(file=>`Attached: ${file.name}`)].filter(Boolean).join("\n")
+    let activeId=conversationId
+    if(!activeId){const created=await api.createConversation();activeId=created.id;conversationIdRef.current=activeId;setConversationId(activeId);setConversations(rows=>[{id:created.id,title:created.title,created_at:new Date().toISOString(),updated_at:new Date().toISOString()},...rows])}
+    const nextUser:ChatMessage={id:newId(),role:"user",content:messageText}
+    const previousMessages=messages
+    setMessages(previous=>[...previous,nextUser]);setBusy(true);setError("");
+    try{
+      await api.addConversationMessage(activeId,{role:"user",content:messageText})
+      if(files.length){
+        await api.upload(files,{courseId})
+        await refresh()
+        appendAssistant(`I’ve added ${files.length===1?"your file":"your files"} to the library. I’ll prepare the content in the background; you can keep chatting while that runs.`)
+      }else{
+        const link=clean.match(/https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\/[^\s<>]+/i)?.[0]?.replace(/[),.!?]+$/g,"")
+        if(link){
+          const result=await api.youtube(link,{courseId})
+          await refresh()
+          if(result.deduplicated&&result.status==="done")appendAssistant("That video is already in your library and ready to study.")
+          else if(result.deduplicated&&result.status==="failed")appendAssistant("That video is already in your library, but its last processing attempt failed. I can resume it now.",{retryJobId:result.job_id||undefined})
+          else appendAssistant("I’ve added the YouTube source. I’ll fetch its transcript and prepare it for study in the background.")
+        }else if(/\b(?:make|create|build)\b.*\b(?:study|learning) plan\b/i.test(clean)){
+          const result=await api.syllabus(courseId)
+          appendAssistant(result.syllabus||"I couldn’t create a study plan from the current library.")
+        }else if(/\b(?:make|create|build)\b.*\bstudy pack\b/i.test(clean)){
+          const topic=clean.replace(/^.*?\bstudy pack\b/i,"").replace(/^\s*(?:about|on|for)\s*/i,"").trim()||"the main ideas in my sources"
+          const result=await api.studyPack(topic,courseId)
+          appendAssistant(result.study_text||"I couldn’t build a study pack from the current library.")
+        }else{
+          const history:ChatTurn[]=previousMessages.filter(message=>message.content.trim()).slice(-8).map(({role,content})=>({role,content:content.slice(0,3000)}))
+          const result=await api.study(clean,courseId,history,retrievalScope)
+          appendAssistant(result.answer||"I couldn’t find an answer in your learning library yet.",{evidenceCount:result.sources?.length||0,supplementalSourceCount:result.supplemental_source_count||0,supplementalSources:result.supplemental_sources||[]})
+        }
+      }
+    }catch(e){appendAssistant(`I couldn’t finish that. ${e instanceof Error?e.message:"Please try again."}`)}
+    finally{setBusy(false);await refresh()}
+  }
+
+  return <div className="app-shell">
+    <aside className="sidebar">
+      <button className="brand" onClick={()=>setView("chat")}><span className="brand-mark"><Sparkles size={17}/></span><span>LearnOS</span></button>
+      <Button variant="outline" disabled={busy} onClick={()=>void newChat()}><Plus size={16}/>New chat</Button>
+      <div className="sidebar-section"><div className="sidebar-label">Recent chats</div>{conversations.slice(0,12).map(chat=><div className="source-shortcut" key={chat.id}><button className="text-link" disabled={busy} onClick={()=>void openChat(chat.id)} title={chat.title}>{chat.title}</button><button className="icon-button" disabled={busy} aria-label="Delete conversation" onClick={()=>void removeChat(chat.id)}><Trash2 size={13}/></button></div>)}{!conversations.length&&<p className="sidebar-empty">Your conversations will appear here.</p>}</div>
+      <nav className="primary-nav" aria-label="Main navigation">
+        <button className={view==="chat"?"selected":""} onClick={()=>setView("chat")}><MessageSquare size={17}/>Chat</button>
+        <button className={view==="plan"?"selected":""} onClick={()=>setView("plan")}><GraduationCap size={17}/>Study plan</button>
+        <button className={view==="library"?"selected":""} onClick={()=>setView("library")}><Library size={17}/>Library <span className="nav-count">{sources.length}</span></button>
+      </nav>
+      <div className="sidebar-section"><div className="sidebar-label">Your library</div>
+        {sources.slice(0,5).map(source=><button className="source-shortcut" key={source.id} onClick={()=>setView("library")} title={source.name}><FileText size={15}/><span>{sourceTitle(source)}</span><i className={`status-dot ${source.status}`} /></button>)}
+        {!sources.length&&<p className="sidebar-empty">Sources you add will appear here.</p>}
+        {sources.length>5&&<button className="text-link" onClick={()=>setView("library")}>See all {sources.length} sources</button>}
+      </div>
+      <div className="sidebar-bottom">
+        <label className="sidebar-label" htmlFor="course-select">Study space</label>
+        <select id="course-select" className="course-select" value={courseId||""} onChange={event=>setCourseId(event.target.value?Number(event.target.value):undefined)}>
+          <option value="">All sources</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}
+        </select>
+        <button className="text-link create-course" onClick={()=>void createCourse()}><Plus size={14}/>Create a course</button>
+        <div className="connection"><i className={health?.status==="ok"?"online":"offline"}/>{health?.status==="ok"?"Connected":"Waiting for server"}</div>
+      </div>
     </aside>
-    <main className="main">
-      <header className="top">
-        <div style={{display:"flex",alignItems:"center",gap:10}}><select className="select" style={{width:"auto",minWidth:180,padding:"7px 10px"}} value={courseId||""} onChange={e=>setCourseId(e.target.value?Number(e.target.value):undefined)}><option value="">All sources</option>{courses.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><button className="btn ghost" title="New course" onClick={createCourse}><Plus size={14}/></button></div>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          {active.length>0&&<Badge><LoaderCircle size={11}/>{active.length} running</Badge>}
-          <button className="btn outline" onClick={refresh}><RefreshCw size={14}/></button>
+
+    <main className="main-area">
+      <header className="app-header">
+        <div className="header-title"><div className="mobile-brand"><span className="brand-mark"><Sparkles size={16}/></span>LearnOS</div><h1>{view==="chat"?"Chat":view==="plan"?"Study plan":"Your library"}</h1><div className="mobile-course-control"><select aria-label="Choose course" className="course-select" value={courseId||""} onChange={event=>setCourseId(event.target.value?Number(event.target.value):undefined)}><option value="">All sources</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}</select><button className="text-link" onClick={()=>void createCourse()}><Plus size={14}/>Course</button></div></div>
+        <div className="header-actions">
+          {activeJobs.length>0&&<Badge><LoaderCircle size={13}/>{activeJobs.length} processing</Badge>}
+          <button className="icon-button" aria-label="Refresh" title="Refresh" onClick={()=>void refresh()}><RefreshCw size={16}/></button>
+          <Button onClick={()=>setAddOpen(true)}><Plus size={16}/><span>Add source</span></Button>
         </div>
       </header>
-      <div className="workspace">
-        {error&&<div className="error" style={{marginBottom:14}}>{error}</div>}
-        {view==="home"&&<Home stats={stats} sources={sources} jobs={jobs} add={()=>setAdd(true)} study={()=>setView("study")}/>}
-        {view==="library"&&<LibraryView sources={sources}/>}
-        {view==="study"&&<StudyView courseId={courseId}/>}
-      </div>
+      {error&&<div className="global-error" role="alert">{error}</div>}
+      {view==="chat"?<ChatView messages={messages} busy={busy} activeJobs={activeJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} send={sendMessage} addSource={()=>setAddOpen(true)} courseSelected={courseId!==undefined}/>:view==="plan"?<StudyPlanView courseId={courseId} refreshKey={planRefreshKey} addSource={()=>setAddOpen(true)}/>:<LibraryView sources={sources} courses={courses} jobs={currentJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} refresh={refresh} addSource={()=>setAddOpen(true)}/>}
     </main>
-    {add&&<AddMaterial courseId={courseId} close={()=>setAdd(false)} refresh={refresh}/>}
+    {addOpen&&<AddSourceDialog courseId={courseId} courses={courses} close={()=>setAddOpen(false)} refresh={refresh}/>}
   </div>
 }
 
-function Home({stats,sources,jobs,add,study}:{stats:Stats|null;sources:Source[];jobs:Job[];add:()=>void;study:()=>void}){
-  const current=jobs.find(j=>j.status==="running")||jobs.find(j=>j.status==="queued")
-  const failed=jobs.filter(j=>j.status==="failed").slice(0,3)
-  return <>
-    <div className="hero">
-      <section className="card hero-card">
-        <div className="eyebrow">Your learning workspace</div>
-        <h1>Add knowledge as you find it. LearnOS organizes it over time.</h1>
-        <p className="muted" style={{maxWidth:650,lineHeight:1.7}}>Add a PDF today, paste a lecture transcript tomorrow, or add a playlist later. Nothing has to arrive together.</p>
-        <div className="actions"><Button onClick={add}><UploadCloud size={16}/>Add material</Button><Button onClick={study} variant="outline"><BookOpen size={16}/>Study</Button></div>
-      </section>
-      <section className="card panel">
-        <div className="eyebrow">Background agent</div><h2 style={{marginTop:7}}>Processing</h2>
-        {current?<><div style={{marginTop:20,fontWeight:650,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{current.source_name}</div><div className="muted" style={{fontSize:11,margin:"4px 0 9px"}}>{current.stage} · {current.progress}</div><div className="progress"><i style={{width:progressValue(current.progress)+"%"}}/></div><p className="muted" style={{fontSize:11,lineHeight:1.55}}>Keep adding material while this runs. Progress is stored.</p></>:<div className="empty">Nothing is processing right now.</div>}
-      </section>
-    </div>
-    <div className="stats">
-      {[["Sources",stats?.sources??sources.length],["Documents",stats?.documents??"-"],["Chunks",stats?.chunks??"-"],["Groups",stats?.grouped??"-"]].map(([a,b])=><div className="card stat" key={String(a)}><strong>{String(b)}</strong><span>{String(a)}</span></div>)}
-    </div>
-      {failed.length>0&&<section className="card panel" style={{marginTop:16}}><div className="eyebrow">Needs attention</div><h2 style={{marginTop:7}}>Processing failed</h2>{failed.map(job=><div key={job.id} style={{marginTop:12}}><strong>{job.source_name||"Source"}</strong><div className="muted" style={{fontSize:11,marginTop:4}}>{job.stage} · {job.error||"Unknown processing error"}</div></div>)}</section>}
-  </>
+function StudyPlanView({courseId,refreshKey,addSource}:{courseId?:number;refreshKey:number;addSource:()=>void}){
+  const[syllabus,setSyllabus]=useState("")
+  const[relationshipInfo,setRelationshipInfo]=useState<PlanRelationships>({sources:[],cross_paths:[],shared_foundations:[]})
+  const[topic,setTopic]=useState("")
+  const[topicId,setTopicId]=useState<string>()
+  const[planNodes,setPlanNodes]=useState<OutlineTopic[]>([])
+  const[tutor,setTutor]=useState("general")
+  const[maxInputTokens,setMaxInputTokens]=useState(6000)
+  const[pack,setPack]=useState<StudyPackExport|null>(null)
+  const[expandedOutline,setExpandedOutline]=useState<string|null>(null)
+  const[completedTopics,setCompletedTopics]=useState<Set<string>>(new Set())
+  const[busy,setBusy]=useState(false)
+  const[error,setError]=useState("")
+  useEffect(()=>{let current=true;setSyllabus("");setRelationshipInfo({sources:[],cross_paths:[],shared_foundations:[]});setPack(null);setTopicId(undefined);setTopic("");setBusy(true);setError("");Promise.all([api.syllabus(courseId),api.studyProgress(courseId)]).then(([plan,progress])=>{if(!current)return;setSyllabus(plan.syllabus||"");setRelationshipInfo(normalizePlanRelationships(plan.source_relationships));setPlanNodes((plan.nodes||[]).map(node=>({id:node.id,parentId:node.parent_id||"",pathId:node.path_id||"main",kind:node.type,topic:node.title,purpose:node.metadata?.purpose||"",prerequisites:node.metadata?.prerequisites||"",groups:Array.isArray(node.metadata?.source_groups)?node.metadata.source_groups:String(node.metadata?.source_groups||"").split(",").map(s=>s.trim()).filter(Boolean),why:node.metadata?.why_included||"",enables:node.metadata?.enables||"",sourceIds:Array.isArray(node.metadata?.source_ids)?node.metadata.source_ids:[],sourceRoles:Array.isArray(node.metadata?.source_roles)?node.metadata.source_roles:[],confidence:node.metadata?.topic_merge_confidence||0})));setCompletedTopics(new Set(progress.completed_topics.map(normalizedTopic)))}).catch(e=>{if(current)setError(e instanceof Error?e.message:"Could not load your study plan")}).finally(()=>{if(current)setBusy(false)});return()=>{current=false}},[courseId,refreshKey])
+  const makePack=async(event:FormEvent)=>{event.preventDefault();if(!topic.trim())return;setBusy(true);setError("");try{const result=await api.exportStudyPack(topic.trim(),courseId,tutor,maxInputTokens,topicId);setPack(result)}catch(e){setError(e instanceof Error?e.message:"Could not prepare study pack")}finally{setBusy(false)}}
+  const outline=planNodes
+  const topicOptions=outline.filter(item=>item.kind==="study").map(item=>item.topic)
+  const toggleComplete=async(item:OutlineTopic,completed:boolean)=>{const key=normalizedTopic(item.topic);const next=new Set(completedTopics);if(completed)next.add(key);else next.delete(key);setCompletedTopics(next);try{await api.updateStudyProgress(item.topic,courseId,completed)}catch(e){setCompletedTopics(completedTopics);setError(e instanceof Error?e.message:"Could not save your progress")}}
+  const selectTopic=(item:OutlineTopic)=>{if(item.kind==="outline"){setExpandedOutline(expandedOutline===item.id?null:item.id);setPack(null);return}setTopic(item.topic);setTopicId(item.id);setPack(null);window.setTimeout(()=>document.getElementById("study-pack-form")?.scrollIntoView({behavior:"smooth",block:"center"}),0)}
+  const hasSources=syllabus&&!syllabus.startsWith("No ")
+  const topicsByGroup=new Map<string,{title:string;items:OutlineTopic[]}>()
+  outline.forEach(item=>{const current=topicsByGroup.get(item.pathId)||{title:item.pathId,items:[]};if(!item.parentId)current.title=item.topic;current.items.push(item);topicsByGroup.set(item.pathId,current)})
+  return <section className="plan-view">
+    <div className="plan-intro"><p className="eyebrow">Learn from your own sources</p><h2>Start with a course. Follow its outline.</h2><p>Add one or more sources and put them in a course. LearnOS turns them into a topic outline. Pick a topic to get a short, cited text pack that you can study here or paste into an AI tutor.</p></div>
+    {!hasSources?<div className="plan-empty"><h3>{busy?"Loading your study plan…":"Start here: add your learning material"}</h3><p>Choose or create a study space, add sources, and LearnOS will organize them and prepare the outline automatically. You can leave this page while processing continues.</p><div className="plan-actions"><Button onClick={addSource}><Plus size={16}/>Add sources</Button></div>{error&&<p className="plan-error" role="alert">{error}</p>}{syllabus&&<p className="plan-error">{syllabus}</p>}</div>:<>
+      <div className="plan-section"><div className="plan-section-heading"><div><span className="step-number">1</span><div><h3>Course outline</h3><span className="plan-help">Broad topics open their own outline. Choose a leaf topic to prepare its study pack.</span></div></div><div className="plan-actions"><CopyAnswer text={syllabus}/></div></div>
+        {(relationshipInfo.sources.length>0||relationshipInfo.shared_foundations.length>0)&&<details className="outline-markdown"><summary>How LearnOS grouped these sources</summary><div className="plan-help">Source identity is inferred and may be uncertain. Shared topics alone do not establish that sources belong to one course.</div>{relationshipInfo.sources.map((r:any,index:number)=><p key={`${r.source_a_id}-${r.source_b_id}-${index}`}>Source {r.source_a_id} + source {r.source_b_id}: <strong>{String(r.relation_type||"").replaceAll("_"," ")}</strong> ({Math.round(Number(r.confidence||0)*100)}% confidence). {r.rationale}</p>)}{relationshipInfo.shared_foundations.length>0&&<p>Shared foundations: {relationshipInfo.shared_foundations.join(", ")}</p>}</details>}
+        <div className="outline-tree">{[...topicsByGroup.entries()].map(([group,path])=>{const done=path.items.filter(item=>item.kind==="study"&&completedTopics.has(normalizedTopic(item.topic))).length;return <details className="outline-group" key={group} open><summary><span>{path.title}</span><small>{done} topics complete</small></summary><div className="outline-topic-list">{path.items.filter(item=>!item.parentId||item.parentId.toLowerCase()==="none").map(item=>{const isDone=completedTopics.has(normalizedTopic(item.topic));return <article className={`outline-topic${isDone?" completed":""}`} key={`${group}-${item.id}`}>
+          {item.kind==="study"&&<label className="outline-check"><input type="checkbox" checked={isDone} onChange={event=>void toggleComplete(item,event.target.checked)} aria-label={`Mark ${item.topic} ${isDone?"not complete":"complete"}`}/><span>{isDone?<Check size={13}/>:null}</span></label>}
+          <button className="outline-topic-button" onClick={()=>selectTopic(item)}><strong>{item.topic}</strong><small>{item.kind==="outline"?"Learning path or topic outline · open subtopics":item.purpose}</small>{item.why&&<em>Why included: {item.why}</em>}{item.enables&&<em>Enables: {item.enables}</em>}{item.sourceRoles.length>0&&<em>Source roles: {item.sourceRoles.join(", ")}</em>}{item.prerequisites&&item.prerequisites!=="None recorded"&&item.prerequisites.toLowerCase()!=="none"&&<em>Prerequisites: {item.prerequisites} · confidence {Math.round(item.confidence*100)}%</em>}</button>
+        </article>})}</div></details>})}</div>
+        {expandedOutline&&<div className="plan-suboutline"><div className="plan-section-heading"><div><h3>{outline.find(item=>item.id===expandedOutline)?.topic}</h3><span className="plan-help">Study these focused topics one at a time.</span></div><Button variant="ghost" onClick={()=>setExpandedOutline(null)}>Close outline</Button></div><div className="outline-topic-list">{outline.filter(item=>item.parentId===expandedOutline).map(item=><article className="outline-topic" key={item.id}><button className="outline-topic-button" onClick={()=>selectTopic(item)}><strong>{item.topic}</strong><small>{item.kind==="outline"?"Open sub-outline":item.purpose}</small></button></article>)}</div></div>}
+        <details className="outline-markdown"><summary>View / copy the full syllabus text</summary><div className="plan-syllabus"><MarkdownText text={syllabus}/></div></details>
+      </div>
+      <div className="plan-section" id="study-pack-form"><div className="plan-section-heading"><div><span className="step-number">2</span><h3>Prepare one topic to study</h3></div></div><p className="plan-help">LearnOS finds source passages for this topic. The pack has a configurable source size; it is an estimate because ChatGPT, Gemini, and Claude tokenize text differently.</p><form className="pack-form" onSubmit={event=>void makePack(event)}><label className="field-label">Topic<input className="text-input" list="syllabus-topics" value={topic} onChange={event=>setTopic(event.target.value)} placeholder="Choose an outline topic or type one" required/><datalist id="syllabus-topics">{topicOptions.map((value,index)=><option key={`${value}-${index}`} value={value}/>)}</datalist></label><label className="field-label">AI tutor<select className="text-input" value={tutor} onChange={event=>setTutor(event.target.value)}><option value="general">Any AI tutor</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="claude">Claude</option></select></label><label className="field-label">Source pack size<select className="text-input" value={maxInputTokens} onChange={event=>setMaxInputTokens(Number(event.target.value))}><option value={4000}>Compact · about 4k tokens</option><option value={6000}>Balanced · about 6k tokens</option><option value={10000}>Expanded · about 10k tokens</option></select></label><Button type="submit" disabled={busy||!topic.trim()}>{busy?<><LoaderCircle size={15}/>Preparing…</>:<><Sparkles size={15}/>Prepare study pack</>}</Button></form>
+        {error&&<p className="plan-error" role="alert">{error}</p>}{pack&&<div className="study-pack-result"><div className="plan-section-heading"><h3>Ready to copy</h3><CopyAnswer text={pack.study_text}/></div><p className="plan-help">About {pack.estimated_tokens.toLocaleString()} tokens · {pack.sources.length} passages{pack.omitted_passages?` · ${pack.omitted_passages} more passages did not fit`:""}. Copy the instructions and cited excerpts together.</p>{pack.omitted_passages>0&&<div className="pack-subtopics"><strong>This topic is broader than one pack.</strong><p>Narrow it to one of these related topics, or select a larger pack size.</p>{pack.suggested_subtopics.map((value,index)=><button type="button" key={`${value}-${index}`} onClick={()=>{setTopic(value);setTopicId(undefined);setPack(null)}}>{value}</button>)}</div>}<div className="plan-syllabus"><MarkdownText text={pack.study_text}/></div></div>}
+      </div>
+    </>}
+  </section>
 }
 
-function LibraryView({sources}:{sources:Source[]}){
-  return <>
-    <div className="section-head"><div><h2>Library</h2><div className="muted" style={{fontSize:12}}>Add one thing now and another later.</div></div></div>
-    <div className="list">
-      {sources.map(s=><div className="card row" key={s.id}>
-        <div style={{width:36,height:36,borderRadius:9,background:"#f0f0f5",display:"grid",placeItems:"center"}}><FileText size={16}/></div>
-        <div className="row-main"><b>{s.name}</b><p>{s.description||s.topic_hint||"No extra context."}</p><div className="chips">{s.domain_hint&&<Badge>{s.domain_hint}</Badge>}<Badge>{s.source_type}</Badge><Badge>{s.status}</Badge></div></div>
-      </div>)}
-      {!sources.length&&<div className="card empty"><FolderOpen size={28}/><div style={{marginTop:8}}>Your library is empty.</div></div>}
-    </div>
-  </>
-}
-
-function StudyView({courseId}:{courseId?:number}){
-  const[topic,setTopic]=useState(""),[question,setQuestion]=useState(""),[syllabus,setSyllabus]=useState(""),[pack,setPack]=useState(""),[answer,setAnswer]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState("")
-  const run=async(fn:()=>Promise<void>)=>{setBusy(true);setError("");try{await fn()}catch(e){setError(e instanceof Error?e.message:"Request failed")}finally{setBusy(false)}}
-  return <>
-    <div className="section-head"><div><h2>Study</h2><div className="muted" style={{fontSize:12}}>Evidence comes from your indexed learning sources.</div></div></div>
-    {error&&<div className="error" style={{marginBottom:12}}>{error}</div>}
-    <div className="panel-grid">
-      <section className="card panel">
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div><strong>Learning path</strong><div className="muted" style={{fontSize:11}}>Syllabus from your course</div></div><Button variant="outline" disabled={busy} onClick={()=>run(async()=>setSyllabus((await api.syllabus(courseId)).syllabus))}><Sparkles size={14}/>Generate</Button></div>
-        <div className="study-output" style={{marginTop:12,background:"#f7f7fa",borderRadius:11,padding:13,minHeight:300,overflow:"auto"}}>{syllabus||"Generate a syllabus after your sources are indexed."}</div>
-      </section>
-      <section className="card panel">
-        <strong>Study one topic</strong><div className="muted" style={{fontSize:11}}>Retrieve, rerank, expand context, synthesize.</div>
-        <div className="actions"><input className="input" value={topic} onChange={e=>setTopic(e.target.value)} placeholder="e.g. hybrid retrieval"/><Button disabled={busy||!topic} onClick={()=>run(async()=>setPack((await api.studyPack(topic,courseId)).study_text))}>Build</Button></div>
-        <textarea className="textarea study-output" style={{marginTop:10,minHeight:220}} readOnly value={pack} placeholder="Your study pack appears here."/>
-        <div style={{marginTop:15}}><strong>Ask your library</strong><textarea className="textarea" style={{marginTop:7,minHeight:86}} value={question} onChange={e=>setQuestion(e.target.value)} placeholder="Ask a focused question..."/><Button disabled={busy||!question} onClick={()=>run(async()=>setAnswer((await api.study(question,courseId)).answer))}><BookOpen size={14}/>Ask</Button></div>
-        {answer&&<div className="study-output" style={{marginTop:10,background:"#f7f7fa",borderRadius:11,padding:13}}>{answer}</div>}
-      </section>
-    </div>
-  </>
-}
-
-function AddMaterial({courseId,close,refresh}:{courseId?:number;close:()=>void;refresh:()=>Promise<void>}){
-  const[mode,setMode]=useState<Mode>("files"),[files,setFiles]=useState<File[]>([]),[drag,setDrag]=useState(false),[name,setName]=useState(""),[payload,setPayload]=useState(""),[format,setFormat]=useState("plain"),[url,setUrl]=useState(""),[topic,setTopic]=useState(""),[domain,setDomain]=useState(""),[description,setDescription]=useState(""),[busy,setBusy]=useState(false),[message,setMessage]=useState(""),[error,setError]=useState("")
+function ChatView({messages,busy,activeJobs,failedJobs,retryingJob,retry,send,addSource,courseSelected}:{messages:ChatMessage[];busy:boolean;activeJobs:Job[];failedJobs:Job[];retryingJob:number|null;retry:(id:number)=>void;send:(text:string,files:File[],scope:"space_only"|"space_and_related"|"all_sources")=>void;addSource:()=>void;courseSelected:boolean}){
+  const[draft,setDraft]=useState("")
+  const[files,setFiles]=useState<File[]>([])
+  const[fileError,setFileError]=useState("")
+  const[retrievalScope,setRetrievalScope]=useState<"space_only"|"space_and_related"|"all_sources">("space_only")
+  useEffect(()=>setRetrievalScope(courseSelected?"space_only":"all_sources"),[courseSelected])
   const inputRef=useRef<HTMLInputElement>(null)
-  const pick=(fs:File[])=>setFiles(prev=>[...prev,...fs])
-  const submit=async()=>{
-    setBusy(true);setError("");setMessage("")
+  const endRef=useRef<HTMLDivElement>(null)
+  useEffect(()=>{endRef.current?.scrollIntoView({behavior:"smooth",block:"end"})},[messages,busy])
+  const submit=(event?:FormEvent)=>{event?.preventDefault();if(!draft.trim()&&!files.length)return;send(draft,files,retrievalScope);setDraft("");setFiles([]);setFileError("")}
+  const onKeyDown=(event:KeyboardEvent<HTMLTextAreaElement>)=>{if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();submit()}}
+  const addFiles=(picked:FileList|null)=>{
+    if(!picked)return
+    const allowed=/\.(pdf|txt|md|docx|pptx|srt|vtt|json)$/i
+    const rejected=Array.from(picked).filter(file=>!allowed.test(file.name))
+    setFileError(rejected.length?"Choose a PDF, Word document or presentation, text, subtitle, or JSON file.":"")
+    setFiles(previous=>[...previous,...Array.from(picked).filter(file=>allowed.test(file.name))])
+  }
+  return <section className="chat-layout" aria-label="Learning chat">
+    <div className="conversation" aria-live="polite">
+      {!messages.length?<div className="welcome">
+        <div className="welcome-icon"><GraduationCap size={25}/></div>
+        <p className="eyebrow">Your personal learning space</p>
+        <h2>What would you like to learn?</h2>
+        <p className="welcome-copy">Ask a question about your sources, or add a video or document. I’ll organize it for you.</p>
+        <div className="suggestion-grid">
+          <button onClick={()=>setDraft("Explain a difficult idea from my sources in simple terms.")}><span>Understand</span><small>Explain an idea simply</small></button>
+          <button onClick={()=>setDraft("Summarize the main ideas in my learning library.")}><span>Review</span><small>Summarize my sources</small></button>
+          <button onClick={()=>setDraft("Make a study plan based on what I have learned so far.")}><span>Plan</span><small>Build a study plan</small></button>
+          <button onClick={addSource}><span>Add knowledge</span><small>Choose a file or paste notes</small></button>
+        </div>
+      </div>:<div className="message-list">{messages.map(message=><article className={`message ${message.role}`} key={message.id}>
+        <div className="message-avatar">{message.role==="assistant"?<Sparkles size={15}/>:<span>You</span>}</div>
+        <div className="message-body"><div className="message-heading"><div className="message-author">{message.role==="assistant"?"LearnOS":"You"}</div>{message.role==="assistant"&&<CopyAnswer text={message.content}/>}</div><div className="message-text">{message.role==="assistant"?<MarkdownText text={message.content}/>:message.content}</div>
+          {message.role==="assistant"&&message.evidenceCount!==undefined&&<details className="evidence-note"><summary>Sources used</summary><span>Grounded in {message.evidenceCount} passages from your library.{message.supplementalSourceCount?` Includes ${message.supplementalSourceCount} supplemental passages from outside this learning space (${message.supplementalSources?.join(", ")||"source names unavailable"}).`:""}</span></details>}
+          {message.retryJobId&&<Button variant="outline" disabled={retryingJob===message.retryJobId} onClick={()=>retry(message.retryJobId!)}>{retryingJob===message.retryJobId?"Resuming…":"Resume processing"}</Button>}
+        </div>
+      </article>)}{busy&&<article className="message assistant"><div className="message-avatar"><Sparkles size={15}/></div><div className="message-body"><div className="message-author">LearnOS</div><div className="thinking"><LoaderCircle size={15}/> Working on it…</div></div></article>}<div ref={endRef}/></div>}
+      {activeJobs.map(job=><div className="job-card" key={job.id}><div className="job-card-icon"><LoaderCircle size={16}/></div><div className="job-card-copy"><strong>Adding {sourceTitle(job)}</strong><span>{stageLabel(job.stage)} · {job.progress}</span></div><div className="job-meter"><i style={{width:`${progressValue(job.progress)}%`}}/></div></div>)}
+      {failedJobs.map(job=><div className="job-card failed-card" key={job.id}><div className="job-card-icon"><X size={16}/></div><div className="job-card-copy"><strong>{sourceTitle(job)} needs attention</strong><span>{job.error_message||"Processing stopped before the source was ready."}</span></div><Button variant="outline" disabled={retryingJob===job.id} onClick={()=>retry(job.id)}>{retryingJob===job.id?"Resuming…":"Resume"}</Button></div>)}
+    </div>
+    <form className="composer-wrap" onSubmit={submit}>
+      {files.length>0&&<div className="attachment-list">{files.map((file,index)=><span className="attachment" key={`${file.name}-${index}`}><FileText size={13}/>{file.name}<button type="button" aria-label={`Remove ${file.name}`} onClick={()=>setFiles(previous=>previous.filter((_,i)=>i!==index))}><X size={13}/></button></span>)}</div>}
+      {fileError&&<div className="file-error" role="alert">{fileError}</div>}
+      <div className="composer">
+        <input ref={inputRef} hidden type="file" multiple accept=".pdf,.txt,.md,.docx,.pptx,.srt,.vtt,.json" onChange={event=>{addFiles(event.target.files);event.target.value=""}}/>
+        <button className="composer-tool" type="button" title="Attach files" aria-label="Attach files" onClick={()=>inputRef.current?.click()}><Paperclip size={19}/></button>
+        <textarea value={draft} rows={1} onChange={event=>setDraft(event.target.value)} onKeyDown={onKeyDown} placeholder="Ask a question or paste a YouTube link…" aria-label="Ask LearnOS" />
+        <button className="send-button" type="submit" disabled={busy||(!draft.trim()&&!files.length)} aria-label="Send"><Send size={17}/></button>
+      </div>
+      <div className="composer-hint"><label>Search scope <select className="text-input" value={retrievalScope} onChange={event=>setRetrievalScope(event.target.value as typeof retrievalScope)}>{courseSelected&&<><option value="space_only">This space only</option><option value="space_and_related">This space plus related sources</option></>}<option value="all_sources">All sources</option></select></label><span>Ask about your sources · attach a file · paste a YouTube link</span></div>
+    </form>
+  </section>
+}
+
+function progressValue(progress:string){const match=progress.match(/(\d+)\/(\d+)/);return match?Math.min(100,Math.round(Number(match[1])/Math.max(1,Number(match[2]))*100)):8}
+
+function LibraryView({sources,courses,jobs,failedJobs,retryingJob,retry,refresh,addSource}:{sources:Source[];courses:Course[];jobs:Job[];failedJobs:Job[];retryingJob:number|null;retry:(id:number)=>void;refresh:()=>Promise<void>;addSource:()=>void}){
+  const[maintenanceNotice,setMaintenanceNotice]=useState("")
+  const[maintenanceJobId,setMaintenanceJobId]=useState<number>()
+  const[maintenanceProgress,setMaintenanceProgress]=useState<MaintenanceJob|null>(null)
+  useEffect(()=>{let current=true;api.maintenanceJobs().then(rows=>{const latest=rows.find(job=>job.task==="organize_existing");if(current&&latest){setMaintenanceJobId(latest.id);setMaintenanceProgress(latest)}}).catch(()=>{});return()=>{current=false}},[])
+  const organizeExisting=async()=>{try{const result=await api.organizeExisting(true);setMaintenanceJobId(result.id);setMaintenanceProgress({...result,task:"organize_existing",errors:{}});setMaintenanceNotice(result.progress_total?`Organization ${result.deduplicated?"is already active":"queued"}.`:"Everything is already organized.")}catch(e){setMaintenanceNotice(e instanceof Error?e.message:"Could not queue organization")}}
+  useEffect(()=>{
+    if(!maintenanceJobId||!maintenanceProgress||!["queued","running"].includes(maintenanceProgress.status))return
+    let current=true
+    const poll=async()=>{try{const rows=await api.maintenanceJobs();const latest=rows.find(job=>job.id===maintenanceJobId);if(current&&latest){setMaintenanceProgress(latest);if(latest.status==="done"){setMaintenanceNotice(latest.progress_total?`Organization finished: ${latest.progress_current}/${latest.progress_total} items processed.`:"Everything is already organized.");void refresh()}if(latest.status==="failed")setMaintenanceNotice(`Organization stopped with ${Object.keys(latest.errors||{}).length} error(s). Review the failed items below and retry.`)}}catch(e){if(current)setMaintenanceNotice(e instanceof Error?e.message:"Could not read organization progress")}}
+    void poll();const timer=window.setInterval(()=>void poll(),1500);return()=>{current=false;window.clearInterval(timer)}
+  },[maintenanceJobId,maintenanceProgress?.status])
+  const retryOrganization=async()=>{if(!maintenanceJobId)return;try{await api.retryMaintenanceJob(maintenanceJobId);setMaintenanceProgress(value=>value?{...value,status:"queued",progress_current:0,errors:{}}:value);setMaintenanceNotice("Organization retry queued.")}catch(e){setMaintenanceNotice(e instanceof Error?e.message:"Could not retry organization")}}
+  const latestBySource=new Map(jobs.map(job=>[job.source_id,job]))
+  const failedIds=new Set(failedJobs.map(job=>job.source_id))
+  const attention=sources.filter(source=>source.status==="failed"||failedIds.has(source.id))
+  const ready=sources.filter(source=>!attention.some(item=>item.id===source.id))
+  const remove=async(source:Source,failedOnly=false)=>{const count=source.failed_attempt_count||0;const message=failedOnly?`Remove ${count} failed processing attempts for this video and keep the completed source?`:`Remove "${sourceTitle(source)}" and all duplicate records with its indexed study data?`;if(!window.confirm(message))return;try{await api.removeSource(source.id,failedOnly);await refresh()}catch(e){window.alert(e instanceof Error?e.message:"Could not remove source")}}
+  const card=(source:Source)=>{const job=latestBySource.get(source.id);const failed=source.status==="failed"||job?.status==="failed";return <article className={`source-card${failed?" source-card-failed":""}`} key={source.id}><div className="source-card-icon"><FileText size={18}/></div><div className="source-card-content"><div className="source-card-title">{sourceTitle(source)}</div><div className="source-card-subtitle">{source.description||source.topic_hint||source.domain_hint||source.name}</div><div className="source-card-footer"><Badge>{statusLabel(failed?"failed":job?.status||source.status)}</Badge>{source.course_id?<Badge>In a learning space</Badge>:<Badge>Unassigned</Badge>}{job&&["running","retrying","queued"].includes(job.status)&&<span className="source-progress">{stageLabel(job.stage)} - {job.progress}</span>}</div>{failed&&<div className="source-error">{job?.error_message||"Processing stopped before this source was ready."}</div>}{Boolean(source.failed_attempt_count)&&<div className="duplicate-note">{source.failed_attempt_count} failed attempt{source.failed_attempt_count===1?"":"s"} for this video</div>}</div><select aria-label={`Move ${source.name} to a learning space`} className="source-course-select" value={source.course_id||""} onChange={async event=>{try{await api.moveSource(source.id,event.target.value?Number(event.target.value):null);await refresh()}catch(e){window.alert(e instanceof Error?e.message:"Could not move source")}}}><option value="">All sources (unassigned)</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}</select><div className="source-card-actions">{failed&&job&&<Button variant="outline" disabled={retryingJob===job.id} onClick={()=>retry(job.id)}>{retryingJob===job.id?<><LoaderCircle size={14}/>Resuming...</>:<><RefreshCw size={14}/>Resume</>}</Button>}{Boolean(source.failed_attempt_count)&&<Button variant="outline" onClick={()=>void remove(source,true)}><Trash2 size={14}/>Remove {source.failed_attempt_count} failed</Button>}<Button variant="outline" onClick={()=>void remove(source)}><Trash2 size={14}/>Remove</Button></div></article>}
+  return <section className="library-view">
+    <div className="library-intro"><div><p className="eyebrow">Your knowledge base</p><h2>Everything you've added</h2><p>Ready sources stay here. Failed sources are kept separately so you can resume or remove them.</p><p className="plan-help">Use “Move to space” on a source to file it manually. “Organize existing” profiles and auto-assigns unassigned sources; existing assignments are preserved.</p>{maintenanceNotice&&<p className="plan-help" role="status">{maintenanceNotice}</p>}{maintenanceProgress&&<div className="maintenance-progress" aria-live="polite"><div><strong>{maintenanceProgress.status==="done"?"Organization complete":maintenanceProgress.status==="failed"?"Organization needs attention":maintenanceProgress.status==="running"?"Organizing existing sources":"Organization queued"}</strong><span>{maintenanceProgress.progress_current} / {maintenanceProgress.progress_total} items{maintenanceProgress.checkpoint?` · last: ${maintenanceProgress.checkpoint}`:""}</span></div><progress max={Math.max(1,maintenanceProgress.progress_total)} value={maintenanceProgress.progress_current}/>{maintenanceProgress.status==="failed"&&<><ul>{Object.entries(maintenanceProgress.errors||{}).slice(0,3).map(([key,value])=><li key={key}>{key}: {value}</li>)}</ul><Button variant="outline" onClick={()=>void retryOrganization()}>Retry organization</Button></>}</div>}</div><div className="plan-actions"><Button variant="outline" disabled={maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)} onClick={()=>void organizeExisting()}>{maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)?<><LoaderCircle size={14}/>Organizing…</>:"Organize existing"}</Button><Button onClick={addSource}><Plus size={16}/>Add a source</Button></div></div>
+    {!sources.length?<div className="library-empty"><div className="welcome-icon"><FolderOpen size={23}/></div><h3>Your library is ready when you are</h3><p>Add a video, document, or transcript. LearnOS will take care of organizing it.</p><Button onClick={addSource}><Plus size={16}/>Add your first source</Button></div>:<>
+      {ready.length>0&&<><h3 className="library-subheading">Ready and processing</h3><div className="library-grid">{ready.map(card)}</div></>}
+      {attention.length>0&&<section className="attention-section"><div className="attention-heading"><div><h3>Needs attention</h3><p>These sources are kept here until you resume processing or remove them.</p></div><Badge>{attention.length}</Badge></div><div className="library-grid">{attention.map(card)}</div></section>}
+    </>}
+  </section>
+}
+
+function AddSourceDialog({courseId,courses,close,refresh}:{courseId?:number;courses:Course[];close:()=>void;refresh:()=>Promise<void>}){
+  const[mode,setMode]=useState<AddMode>("file")
+  const[files,setFiles]=useState<File[]>([])
+  const[url,setUrl]=useState("")
+  const[name,setName]=useState("")
+  const[pasted,setPasted]=useState("")
+  const[busy,setBusy]=useState(false)
+  const[notice,setNotice]=useState("")
+  const[error,setError]=useState("")
+  const[spaceMode,setSpaceMode]=useState<"auto"|"existing"|"new"|"unassigned">(courseId?"existing":"auto")
+  const[spaceId,setSpaceId]=useState(courseId?String(courseId):"")
+  const[spaceName,setSpaceName]=useState("")
+  const fileRef=useRef<HTMLInputElement>(null)
+  const submit=async(event:FormEvent)=>{
+    event.preventDefault();setBusy(true);setError("");setNotice("")
     try{
-      if(mode==="files"){
-        if(!files.length)throw new Error("Choose at least one file.")
-        await api.upload(files,{courseId,topic,domain,description})
-        setFiles([]);setMessage("Added. The agent will process it in the background.")
-      }else if(mode==="paste"){
-        if(!payload.trim())throw new Error("Paste some content first.")
-        const f=new FormData();f.append("name",name||"Pasted material");f.append("payload",payload);f.append("input_format",format)
-        if(courseId)f.append("course_id",String(courseId));if(topic)f.append("topic_hint",topic);if(domain)f.append("domain_hint",domain);if(description)f.append("description",description)
-        await api.manual(f);setPayload("");setMessage("Added. You can add another item whenever you like.")
+      let targetCourseId:number|undefined
+      if(spaceMode==="existing"){
+        targetCourseId=Number(spaceId)
+        if(!targetCourseId)throw new Error("Choose a learning space.")
+      }else if(spaceMode==="new"){
+        if(!spaceName.trim())throw new Error("Enter a name for the new learning space.")
+        targetCourseId=(await api.createCourse({name:spaceName.trim()})).id
+      }
+      if(mode==="file"){
+        if(!files.length)throw new Error("Choose a file first.")
+        const assignmentMode=spaceMode==="auto"?"auto":spaceMode==="unassigned"?"explicit_unassigned":"explicit_course"
+        const results=await api.upload(files,{courseId:targetCourseId,assignmentMode});const conflict=results.some((result:any)=>result.assignment_conflict);setNotice(conflict?"At least one source already exists in a different space. Existing assignments were preserved; move it from Library if you want to change it.":`Added ${files.length===1?"1 file":`${files.length} files`}. I’m preparing them now.`);setFiles([])
+      }else if(mode==="youtube"){
+        if(!url.trim())throw new Error("Paste a YouTube video or playlist link.")
+        const result=await api.youtube(url,{courseId:targetCourseId,assignmentMode:spaceMode==="auto"?"auto":spaceMode==="unassigned"?"explicit_unassigned":"explicit_course",name:name||undefined})
+        setNotice(result.deduplicated?result.assignment_conflict?"This source is already filed in a different space. Its existing assignment was preserved; move it from Library if you want to change it.":result.status==="done"?"That source is already in your library and ready.":"That source is already in your library.":"Added. I’ll fetch and prepare it in the background.")
       }else{
-        if(!url.trim())throw new Error("Enter a YouTube URL.")
-        await api.youtube(url,{courseId,name:name||undefined,topic,domain,description});setUrl("");setMessage("Added. The video or playlist is now queued.")
+        if(!pasted.trim())throw new Error("Paste some notes or a transcript first.")
+        const form=new FormData();form.append("name",name||"Pasted notes");form.append("payload",pasted);form.append("input_format","plain");form.append("assignment_mode",spaceMode==="auto"?"auto":spaceMode==="unassigned"?"explicit_unassigned":"explicit_course");if(targetCourseId)form.append("course_id",String(targetCourseId))
+        const result:any=await api.manual(form);setNotice(result.deduplicated?result.assignment_conflict?"These notes already exist in a different space. Their existing assignment was preserved.":"These notes are already in your library.":"Added. I’ll organize it in the background.");setPasted("")
       }
       await refresh()
-    }catch(e){setError(e instanceof Error?e.message:"Could not add material")}finally{setBusy(false)}
+    }catch(e){setError(e instanceof Error?e.message:"Could not add this source")}finally{setBusy(false)}
   }
-  return <div className="modal-bg" onMouseDown={e=>e.currentTarget===e.target&&close()}>
-    <div className="modal">
-      <div className="modal-head"><div><strong>Add material</strong><div className="muted" style={{fontSize:11,marginTop:2}}>Add one thing now. Nothing has to arrive together.</div></div><button className="btn ghost" onClick={close}><X size={17}/></button></div>
-      <div className="modal-body">
-        <div className="tabs">{([["files","Files"],["paste","Paste"],["youtube","YouTube"]] as const).map(([id,label])=><button key={id} className={mode===id?"active":""} onClick={()=>setMode(id)}>{label}</button>)}</div>
-        {mode==="files"&&<div className={"drop "+(drag?"drag":"")} onClick={()=>inputRef.current?.click()} onDragOver={e=>{e.preventDefault();setDrag(true)}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);pick(Array.from(e.dataTransfer.files))}}><UploadCloud size={24}/><strong>Drop files here</strong><small>or click to choose · one file or many</small><input ref={inputRef} hidden type="file" multiple accept=".pdf,.txt,.md,.docx,.srt,.vtt,.json" onChange={e=>pick(Array.from(e.target.files||[]))}/>{files.length>0&&<div className="chips" style={{justifyContent:"center"}}>{files.map((f,i)=><Badge key={i}>{f.name}</Badge>)}</div>}</div>}
-        {mode==="paste"&&<><div className="field"><label>Name <span className="muted">(optional)</span></label><input className="input" value={name} onChange={e=>setName(e.target.value)} placeholder="Lecture 3 — Retrieval"/></div><div className="field"><label>Format</label><select className="select" value={format} onChange={e=>setFormat(e.target.value)}><option value="plain">Plain transcript / text</option><option value="srt">SRT</option><option value="vtt">VTT</option><option value="python_dict">Python dictionary</option><option value="json">JSON</option></select></div><div className="field"><label>Content</label><textarea className="textarea" style={{minHeight:220}} value={payload} onChange={e=>setPayload(e.target.value)} placeholder={format==="python_dict"?"Paste a Python dict containing transcript/text/content...":"Paste transcript, notes, or source text here."}/></div></>}
-        {mode==="youtube"&&<div className="field"><label>YouTube video or playlist URL</label><input className="input" value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://youtube.com/..."/></div>}
-        <details style={{marginTop:14}}><summary className="muted" style={{cursor:"pointer",fontSize:12}}>Optional context</summary><div className="two"><div className="field"><label>Topic</label><input className="input" value={topic} onChange={e=>setTopic(e.target.value)} placeholder="RAG"/></div><div className="field"><label>Domain</label><input className="input" value={domain} onChange={e=>setDomain(e.target.value)} placeholder="AI / Information Retrieval"/></div></div><div className="field"><label>Description</label><textarea className="textarea" style={{minHeight:70}} value={description} onChange={e=>setDescription(e.target.value)} placeholder="Optional. Helps routing."/></div></details>
-        {message&&<div className="notice" style={{marginTop:13}}>{message}</div>}{error&&<div className="error" style={{marginTop:13}}>{error}</div>}
+  return <div className="dialog-backdrop" onMouseDown={event=>event.currentTarget===event.target&&close()}><section className="add-dialog" role="dialog" aria-modal="true" aria-labelledby="add-title">
+    <header className="dialog-header"><div><h2 id="add-title">Add to your library</h2><p>LearnOS will prepare it for you.</p></div><button className="icon-button" aria-label="Close" onClick={close}><X size={18}/></button></header>
+    <div className="dialog-tabs" role="tablist">{(["file","youtube","paste"] as AddMode[]).map(item=><button key={item} role="tab" aria-selected={mode===item} className={mode===item?"active":""} onClick={()=>setMode(item)}>{item==="file"?"File":item==="youtube"?"YouTube":"Paste notes"}</button>)}</div>
+    <form onSubmit={submit}>
+      <div className="dialog-content">
+        <label className="field-label">Learning space<select className="text-input" value={spaceMode} onChange={event=>setSpaceMode(event.target.value as "auto"|"existing"|"new"|"unassigned")}><option value="auto">Let LearnOS decide after processing</option><option value="existing">Add to an existing space</option><option value="new">Create a new space</option><option value="unassigned">Keep in All Sources</option></select></label>
+        {spaceMode==="existing"&&<label className="field-label">Choose a space<select className="text-input" value={spaceId} onChange={event=>setSpaceId(event.target.value)}><option value="">Select a learning space</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}</select></label>}
+        {spaceMode==="new"&&<label className="field-label">New space name<input className="text-input" value={spaceName} onChange={event=>setSpaceName(event.target.value)} placeholder="e.g. Natural Language Processing"/></label>}
+        {mode==="file"&&<><input ref={fileRef} type="file" hidden multiple accept=".pdf,.txt,.md,.docx,.pptx,.srt,.vtt,.json" onChange={event=>setFiles(Array.from(event.target.files||[]))}/><button className="file-drop" type="button" onClick={()=>fileRef.current?.click()}><UploadCloud size={23}/><strong>{files.length?`${files.length} file${files.length===1?"":"s"} selected`:"Choose files"}</strong><span>PDF, Word, PowerPoint, text, subtitle, or JSON</span></button>{files.map(file=><div className="file-row" key={file.name}><FileText size={15}/>{file.name}</div>)}</>}
+        {mode==="youtube"&&<label className="field-label">Paste a YouTube link<input className="text-input" autoFocus value={url} onChange={event=>setUrl(event.target.value)} placeholder="https://youtu.be/…"/></label>}
+        {mode==="paste"&&<label className="field-label">Paste your notes or transcript<textarea className="text-input paste-input" autoFocus value={pasted} onChange={event=>setPasted(event.target.value)} placeholder="Paste text here…"/></label>}
+        {(mode!=="file")&&<label className="field-label optional-label">Name <span>optional</span><input className="text-input" value={name} onChange={event=>setName(event.target.value)} placeholder="e.g. Week 2 lecture"/></label>}
+        {notice&&<p className="dialog-notice">{notice}</p>}{error&&<p className="dialog-error" role="alert">{error}</p>}
       </div>
-      <div className="modal-foot"><Button variant="ghost" onClick={close}>Close</Button><Button disabled={busy} onClick={submit}>{busy?<><LoaderCircle size={14}/>Adding…</>:<><Plus size={14}/>Add to library</>}</Button></div>
-    </div>
-  </div>
+      <footer className="dialog-footer"><Button variant="ghost" onClick={close}>Close</Button><Button type="submit" disabled={busy}>{busy?<><LoaderCircle size={15}/>Adding…</>:<><Plus size={15}/>Add source</>}</Button></footer>
+    </form>
+  </section></div>
 }

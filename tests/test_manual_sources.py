@@ -25,3 +25,27 @@ def test_python_dictionary_literal_is_safe_and_supported():
     obj = parse_structured_literal("{'topic': 'RAG', 'transcript': 'Hybrid retrieval'}")
     assert obj['topic'] == 'RAG'
     assert obj['transcript'] == 'Hybrid retrieval'
+
+
+def test_youtube_url_parser_rejects_unrelated_hosts_and_bad_video_ids():
+    from app.services.ingestion import list_youtube_videos, youtube_video_id
+
+    assert youtube_video_id("https://www.youtube.com/watch?v=BaW_jenozKc") == "BaW_jenozKc"
+    assert youtube_video_id("https://youtube.com.evil.example/watch?v=BaW_jenozKc") is None
+    assert youtube_video_id("https://www.youtube.com/watch?v=bad") is None
+    import pytest
+    with pytest.raises(ValueError, match="YouTube video or playlist"):
+        list_youtube_videos("https://example.com/watch?list=PL123")
+
+
+def test_youtube_transcript_extraction_failure_is_raised(monkeypatch):
+    from youtube_transcript_api import YouTubeTranscriptApi
+    from app.services.ingestion import fetch_youtube_transcript
+
+    def fail_fetch(self, video_id, languages):
+        raise RuntimeError("captions blocked by network")
+
+    monkeypatch.setattr(YouTubeTranscriptApi, "fetch", fail_fetch)
+    import pytest
+    with pytest.raises(RuntimeError, match="Transcript unavailable.*captions blocked by network"):
+        fetch_youtube_transcript("BaW_jenozKc", languages=("en",))

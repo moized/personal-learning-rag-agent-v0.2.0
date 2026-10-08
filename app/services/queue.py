@@ -50,7 +50,7 @@ def claim_next(db: Session) -> Job | None:
     result = db.execute(
         update(Job)
         .where(Job.id == candidate, Job.status == "queued")
-        .values(status="running", updated_at=now)
+        .values(status="running", started_at=now, updated_at=now)
     )
     if result.rowcount != 1:
         db.rollback()

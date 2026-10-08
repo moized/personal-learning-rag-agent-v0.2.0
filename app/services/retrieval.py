@@ -54,7 +54,7 @@ def _course_chunks(db: Session, course_id: int | None, group_ids: list[int] | No
         select(Chunk)
         .join(Document, Chunk.document_id == Document.id)
         .join(Source, Document.source_id == Source.id)
-        .where(Chunk.embedding_status == "done", Chunk.chunk_kind == "leaf")
+        .where(Chunk.embedding_status == "done", Chunk.chunk_kind == "leaf", Source.status == "done")
     )
     if group_ids:
         stmt = stmt.where(Chunk.group_id.in_(group_ids))
@@ -81,6 +81,7 @@ def group_candidates(
                 Source.course_id == course_id,
                 Chunk.embedding_status == "done",
                 Chunk.chunk_kind == "leaf",
+                Source.status == "done",
             )
         ).all()
         allowed = {row[0] for row in rows if row[0] is not None}
@@ -268,6 +269,7 @@ def retrieve_many(
     target_concepts: list[str] | None = None,
     prerequisite_depth: int = 0,
     rerank_question: str | None = None,
+    use_reranker: bool = True,
 ) -> list[tuple[Chunk, float]]:
     """Retrieve from multiple query views, fuse once, graph-expand, then rerank once."""
     queries = [q.strip() for q in queries if q and q.strip()]
@@ -311,7 +313,7 @@ def retrieve_many(
 
     candidates = sorted(by_id.values(), key=lambda item: item[1], reverse=True)
     candidates = candidates[: settings.fused_candidate_k]
-    reranked = _llm_rerank(ai, rerank_question or queries[0], candidates, final_k)
+    reranked = _llm_rerank(ai, rerank_question or queries[0], candidates, final_k) if use_reranker else candidates[:final_k]
     return expand_context_window(
         db,
         reranked,
@@ -327,6 +329,7 @@ def retrieve(
     group_ids: list[int] | None = None,
     top_k: int | None = None,
     course_id: int | None = None,
+    use_reranker: bool = True,
 ) -> list[tuple[Chunk, float]]:
     return retrieve_many(
         db,
@@ -335,6 +338,7 @@ def retrieve(
         group_ids=group_ids,
         top_k=top_k,
         course_id=course_id,
+        use_reranker=use_reranker,
     )
 
 

@@ -10,7 +10,7 @@
 - YouTube video and playlist ingestion with video-level checkpoints.
 - Hierarchical parent/leaf chunk windows and deterministic next-chunk relations.
 - Context-enriched embeddings, semantic grouping and group-level concept extraction.
-- Concept relationship extraction for prerequisite, related and contradiction edges.
+- Cross-group concept relationship extraction with source-chunk provenance for prerequisite, parallel, related and contradiction edges.
 - Adaptive multi-query dense + BM25 retrieval with one RRF fusion and one optional LLM rerank.
 - Prerequisite graph traversal can inject supporting evidence before reranking.
 - Parent/neighbor context expansion after reranking.

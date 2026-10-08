@@ -1,18 +1,24 @@
 import json
+import hashlib
+import threading
+from collections import defaultdict
+from datetime import datetime, UTC
+from typing import Literal
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl, Field
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func, delete
+from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import init_db, session_scope
-from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace
+from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace, ChunkRelation, StudyProgress, StudyPlan, StudyPlanNode, Conversation, ConversationMessage, MaintenanceJob, SourceRelationship
 from .services.files import save_upload, save_text_content
 from .services.queue import enqueue
 from .services.worker import Worker
 from .providers.factory import provider
 from .services.study import answer
-from .services.curriculum import build_syllabus, build_study_pack_prompt
-from .services.ingestion import parse_structured_literal, clean_caption_text
+from .services.curriculum import build_syllabus, build_syllabus_structured, build_study_pack_prompt, build_external_study_pack
+from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(
@@ -23,6 +29,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 worker: Worker | None = None
+_study_plan_locks: dict[str, threading.Lock] = {}
+_study_plan_locks_guard = threading.Lock()
+
+
+def _study_plan_lock(scope_key: str) -> threading.Lock:
+    """Serialize cache refreshes for one plan scope within this API process."""
+    with _study_plan_locks_guard:
+        return _study_plan_locks.setdefault(scope_key, threading.Lock())
+
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=3000)
 
 
 class StudyRequest(BaseModel):
@@ -30,12 +49,32 @@ class StudyRequest(BaseModel):
     group_id: int | None = None
     course_id: int | None = None
     top_k: int = Field(default=8, ge=1, le=50)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=8)
+    retrieval_scope: Literal["space_only", "space_and_related", "all_sources"] = "space_only"
 
 
 class StudyPackRequest(BaseModel):
     topic: str
     course_id: int | None = None
     top_k: int = Field(default=12, ge=1, le=30)
+    topic_id: str | None = None
+    retrieval_scope: Literal["space_only", "space_and_related", "all_sources"] = "space_only"
+
+
+class ExternalStudyPackRequest(BaseModel):
+    topic: str = Field(min_length=1, max_length=500)
+    course_id: int | None = None
+    top_k: int = Field(default=12, ge=1, le=20)
+    max_input_tokens: int = Field(default=6000, ge=1000, le=24000)
+    tutor: Literal["general", "chatgpt", "gemini", "claude"] = "general"
+    topic_id: str | None = None
+    retrieval_scope: Literal["space_only", "space_and_related", "all_sources"] = "space_only"
+
+
+class StudyProgressRequest(BaseModel):
+    topic: str = Field(min_length=1, max_length=500)
+    course_id: int | None = None
+    completed: bool = True
 
 
 class CourseRequest(BaseModel):
@@ -45,15 +84,30 @@ class CourseRequest(BaseModel):
     outline: str | None = None
 
 
+class SourceCourseRequest(BaseModel):
+    course_id: int | None = None
+
+
 class StructuredSourceRequest(BaseModel):
     name: str
     course_id: int | None = None
+    assignment_mode: Literal["auto", "explicit_course", "explicit_unassigned"] = "explicit_unassigned"
     domain_hint: str | None = None
     topic_hint: str | None = None
     description: str | None = None
     metadata: dict | None = None
     transcript: str | None = None
     content: str | None = None
+
+
+class ConversationCreateRequest(BaseModel):
+    title: str = Field(default="New chat", max_length=500)
+
+
+class ConversationMessageRequest(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=20000)
+    metadata: dict | None = None
 
 
 @app.on_event("startup")
@@ -85,6 +139,58 @@ def health():
     }
 
 
+@app.get("/conversations")
+def list_conversations():
+    with session_scope() as db:
+        return [{"id": c.id, "title": c.title, "created_at": c.created_at.isoformat(), "updated_at": c.updated_at.isoformat()} for c in db.execute(select(Conversation).order_by(Conversation.updated_at.desc())).scalars().all()]
+
+
+@app.post("/conversations")
+def create_conversation(req: ConversationCreateRequest):
+    from uuid import uuid4
+    with session_scope() as db:
+        row = Conversation(id=str(uuid4()), title=req.title.strip() or "New chat")
+        db.add(row)
+        db.flush()
+        return {"id": row.id, "title": row.title}
+
+
+@app.get("/conversations/{conversation_id}")
+def get_conversation(conversation_id: str):
+    with session_scope() as db:
+        row = db.get(Conversation, conversation_id)
+        if row is None:
+            raise HTTPException(404, "Conversation not found")
+        messages = db.execute(select(ConversationMessage).where(ConversationMessage.conversation_id == conversation_id).order_by(ConversationMessage.id)).scalars().all()
+        return {"id": row.id, "title": row.title, "messages": [{"id": str(m.id), "role": m.role, "content": m.content, "metadata": json.loads(m.metadata_json or "{}")} for m in messages]}
+
+
+@app.post("/conversations/{conversation_id}/messages")
+def add_conversation_message(conversation_id: str, req: ConversationMessageRequest):
+    with session_scope() as db:
+        row = db.get(Conversation, conversation_id)
+        if row is None:
+            raise HTTPException(404, "Conversation not found")
+        message = ConversationMessage(conversation_id=conversation_id, role=req.role, content=req.content, metadata_json=json.dumps(req.metadata or {}, ensure_ascii=False))
+        db.add(message)
+        if req.role == "user" and row.title == "New chat":
+            row.title = req.content.strip().splitlines()[0][:90] or "New chat"
+        row.updated_at = datetime.now(UTC)
+        db.flush()
+        return {"id": str(message.id), "role": message.role, "content": message.content}
+
+
+@app.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str):
+    with session_scope() as db:
+        row = db.get(Conversation, conversation_id)
+        if row is None:
+            raise HTTPException(404, "Conversation not found")
+        db.execute(delete(ConversationMessage).where(ConversationMessage.conversation_id == conversation_id))
+        db.delete(row)
+        return {"deleted": True, "id": conversation_id}
+
+
 @app.post("/courses")
 def create_course(req: CourseRequest):
     with session_scope() as db:
@@ -112,19 +218,119 @@ def sources(course_id: int | None = None):
         query = select(Source).order_by(Source.created_at.desc())
         if course_id is not None:
             query = query.where(Source.course_id == course_id)
+        source_rows = db.execute(query).scalars().all()
+        # Older versions could create multiple rows for the same YouTube URL.
+        # Keep the most useful record visible, preferring completed ingestion.
+        unique_sources: dict[tuple[str, str | int], Source] = {}
+        failed_attempts: dict[tuple[str, str | int], int] = defaultdict(int)
+        for source in source_rows:
+            if source.source_type == "youtube":
+                key = ("youtube", canonical_youtube_url(source.uri or source.name))
+            else:
+                key = ("source", source.id)
+            if source.status == "failed":
+                failed_attempts[key] += 1
+            current = unique_sources.get(key)
+            if current is None or (source.status == "done" and current.status != "done"):
+                unique_sources[key] = source
         return [
             {
                 "id": source.id,
                 "name": source.name,
                 "source_type": source.source_type,
                 "course_id": source.course_id,
+                "assignment_mode": source.assignment_mode,
+                "assignment_status": source.assignment_status,
                 "status": source.status,
                 "topic_hint": source.topic_hint,
                 "domain_hint": source.domain_hint,
                 "description": source.description,
+                "failed_attempt_count": failed_attempts[key],
             }
-            for source in db.execute(query).scalars().all()
+            for source in unique_sources.values()
         ]
+
+
+@app.patch("/sources/{source_id}/course")
+def move_source_to_course(source_id: int, req: SourceCourseRequest):
+    with session_scope() as db:
+        source = db.get(Source, source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="Source not found")
+        if req.course_id is not None and db.get(Course, req.course_id) is None:
+            raise HTTPException(status_code=404, detail="Course not found")
+        source.course_id = req.course_id
+        source.assignment_mode = "explicit_course" if req.course_id is not None else "explicit_unassigned"
+        source.assignment_status = "assigned" if req.course_id is not None else "unassigned"
+        source.assignment_reason = "Changed explicitly in the library."
+        db.flush()
+        return {"id": source.id, "course_id": source.course_id}
+
+
+@app.delete("/sources/{source_id}")
+def remove_source(source_id: int, failed_attempts_only: bool = False):
+    from pathlib import Path
+
+    local_paths: list[Path] = []
+    with session_scope() as db:
+        source = db.get(Source, source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="Source not found")
+        related_sources = [source]
+        if source.source_type == "youtube":
+            canonical = canonical_youtube_url(source.uri or source.name)
+            related_sources = [item for item in db.execute(
+                select(Source).where(Source.source_type == "youtube")
+            ).scalars().all() if canonical_youtube_url(item.uri or item.name) == canonical]
+        if failed_attempts_only:
+            related_sources = [item for item in related_sources if item.status == "failed"]
+            if not related_sources:
+                return {"removed": True, "source_id": source_id, "removed_count": 0}
+        source_ids = {item.id for item in related_sources}
+        active_job = db.execute(
+            select(Job.id).where(Job.source_id.in_(source_ids), Job.status.in_(["queued", "running", "retrying"])).limit(1)
+        ).first()
+        if active_job:
+            raise HTTPException(status_code=409, detail="This source is still processing. Wait until it finishes before removing it.")
+
+        document_ids = [row[0] for row in db.execute(select(Document.id).where(Document.source_id.in_(source_ids))).all()]
+        chunk_rows = db.execute(select(Chunk.id, Chunk.parent_chunk_id).where(Chunk.document_id.in_(document_ids))).all() if document_ids else []
+        chunk_ids = {row.id for row in chunk_rows}
+        if chunk_ids:
+            db.execute(delete(ChunkRelation).where(or_(ChunkRelation.from_chunk_id.in_(chunk_ids), ChunkRelation.to_chunk_id.in_(chunk_ids))))
+            db.execute(delete(Evidence).where(Evidence.chunk_id.in_(chunk_ids)))
+            # Remove leaf chunks before their parent windows to respect the self-reference.
+            remaining = {row.id: row.parent_chunk_id for row in chunk_rows}
+            while remaining:
+                parents = {parent for parent in remaining.values() if parent is not None}
+                removable = set(remaining).difference(parents)
+                if not removable:
+                    removable = set(remaining)
+                db.execute(delete(Chunk).where(Chunk.id.in_(removable)))
+                for chunk_id in removable:
+                    remaining.pop(chunk_id, None)
+            orphan_concepts = [row[0] for row in db.execute(
+                select(Concept.id).where(~select(Evidence.id).where(Evidence.concept_id == Concept.id).exists())
+            ).all()]
+            if orphan_concepts:
+                db.execute(delete(ConceptRelation).where(or_(ConceptRelation.from_concept_id.in_(orphan_concepts), ConceptRelation.to_concept_id.in_(orphan_concepts))))
+                db.execute(delete(Concept).where(Concept.id.in_(orphan_concepts)))
+        if document_ids:
+            db.execute(delete(Document).where(Document.id.in_(document_ids)))
+        db.execute(delete(Job).where(Job.source_id.in_(source_ids)))
+        db.execute(delete(SourceRelationship).where(or_(SourceRelationship.source_a_id.in_(source_ids), SourceRelationship.source_b_id.in_(source_ids))))
+        upload_root = settings.upload_path.resolve()
+        for item in related_sources:
+            if item.local_path:
+                candidate = Path(item.local_path).resolve()
+                if candidate.is_relative_to(upload_root):
+                    local_paths.append(candidate)
+        db.execute(delete(Source).where(Source.id.in_(source_ids)))
+
+    for path in local_paths:
+        if path.exists():
+            path.unlink()
+    return {"removed": True, "source_id": source_id, "removed_count": len(source_ids)}
 
 
 def _metadata_fields(metadata: dict | None, domain_hint: str | None, topic_hint: str | None, description: str | None):
@@ -138,13 +344,23 @@ def _metadata_fields(metadata: dict | None, domain_hint: str | None, topic_hint:
     return domain_hint, topic_hint, description
 
 
-def _create_source(db, *, name, source_type, course_id, domain_hint, topic_hint, description, metadata_json, uri=None, local_path=None, content_hash=None):
+def _create_source(db, *, name, source_type, course_id, assignment_mode, domain_hint, topic_hint, description, metadata_json, uri=None, local_path=None, content_hash=None):
+    if assignment_mode not in {"auto", "explicit_course", "explicit_unassigned"}:
+        raise HTTPException(422, "Invalid source assignment mode")
+    if assignment_mode == "explicit_course" and course_id is None:
+        raise HTTPException(422, "Choose a learning space for explicit_course assignment")
+    if assignment_mode == "explicit_course" and db.get(Course, course_id) is None:
+        raise HTTPException(404, "Course not found")
+    if assignment_mode != "explicit_course":
+        course_id = None
     src = Source(
         name=name,
         source_type=source_type,
         uri=uri,
         local_path=local_path,
         course_id=course_id,
+        assignment_mode=assignment_mode,
+        assignment_status="pending" if assignment_mode == "auto" else "assigned" if course_id is not None else "unassigned",
         domain_hint=domain_hint,
         topic_hint=topic_hint,
         description=description,
@@ -160,7 +376,7 @@ def _create_source(db, *, name, source_type, course_id, domain_hint, topic_hint,
 
 @app.post("/sources/file")
 def upload_source(
-    file: UploadFile = File(...), course_id: int | None = Form(None), domain_hint: str | None = Form(None),
+    file: UploadFile = File(...), course_id: int | None = Form(None), assignment_mode: str = Form("explicit_unassigned"), domain_hint: str | None = Form(None),
     topic_hint: str | None = Form(None), description: str | None = Form(None), metadata_json: str | None = Form(None),
 ):
     path, digest = save_upload(file)
@@ -174,9 +390,10 @@ def upload_source(
     with session_scope() as db:
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
-            return {"source_id": existing.id, "job_id": None, "deduplicated": True}
+            conflict = (assignment_mode == "explicit_course" and existing.course_id != course_id) or (assignment_mode == "explicit_unassigned" and existing.course_id is not None)
+            return {"source_id": existing.id, "job_id": None, "deduplicated": True, "assignment_preserved": True, "assignment_conflict": conflict, "course_id": existing.course_id}
         src, job = _create_source(
-            db, name=file.filename, source_type="file", course_id=course_id,
+            db, name=file.filename, source_type="file", course_id=course_id, assignment_mode=assignment_mode,
             domain_hint=domain_hint, topic_hint=topic_hint, description=description,
             metadata_json=json.dumps(metadata, ensure_ascii=False) if metadata else metadata_json,
             local_path=str(path), content_hash=digest,
@@ -187,7 +404,7 @@ def upload_source(
 @app.post("/sources/manual")
 def add_manual_source(
     name: str = Form(...), payload: str = Form(...), input_format: str = Form("plain"),
-    course_id: int | None = Form(None), domain_hint: str | None = Form(None), topic_hint: str | None = Form(None),
+    course_id: int | None = Form(None), assignment_mode: str = Form("explicit_unassigned"), domain_hint: str | None = Form(None), topic_hint: str | None = Form(None),
     description: str | None = Form(None),
 ):
     if not payload.strip():
@@ -210,9 +427,10 @@ def add_manual_source(
     with session_scope() as db:
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
-            return {"source_id": existing.id, "job_id": None, "deduplicated": True}
+            conflict = (assignment_mode == "explicit_course" and existing.course_id != course_id) or (assignment_mode == "explicit_unassigned" and existing.course_id is not None)
+            return {"source_id": existing.id, "job_id": None, "deduplicated": True, "assignment_preserved": True, "assignment_conflict": conflict, "course_id": existing.course_id}
         src, job = _create_source(
-            db, name=name, source_type="transcript", course_id=course_id,
+            db, name=name, source_type="transcript", course_id=course_id, assignment_mode=assignment_mode,
             domain_hint=domain_hint, topic_hint=topic_hint, description=description,
             metadata_json=json.dumps(metadata, ensure_ascii=False) if metadata else None,
             local_path=str(path), content_hash=digest,
@@ -221,7 +439,7 @@ def add_manual_source(
 
 
 @app.post("/sources/transcript")
-def add_manual_transcript(name: str = Form(...), transcript: str = Form(...), course_id: int | None = Form(None),
+def add_manual_transcript(name: str = Form(...), transcript: str = Form(...), course_id: int | None = Form(None), assignment_mode: str = Form("explicit_unassigned"),
                           domain_hint: str | None = Form(None), topic_hint: str | None = Form(None), description: str | None = Form(None),
                           metadata_json: str | None = Form(None)):
     if not transcript.strip():
@@ -232,9 +450,10 @@ def add_manual_transcript(name: str = Form(...), transcript: str = Form(...), co
     with session_scope() as db:
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
-            return {"source_id": existing.id, "job_id": None, "deduplicated": True}
+            conflict = (assignment_mode == "explicit_course" and existing.course_id != course_id) or (assignment_mode == "explicit_unassigned" and existing.course_id is not None)
+            return {"source_id": existing.id, "job_id": None, "deduplicated": True, "assignment_preserved": True, "assignment_conflict": conflict, "course_id": existing.course_id}
         src, job = _create_source(
-            db, name=name, source_type="transcript", course_id=course_id,
+            db, name=name, source_type="transcript", course_id=course_id, assignment_mode=assignment_mode,
             domain_hint=domain_hint, topic_hint=topic_hint, description=description,
             metadata_json=json.dumps(metadata, ensure_ascii=False) if metadata else None,
             local_path=str(path), content_hash=digest,
@@ -251,11 +470,12 @@ def add_structured_source(req: StructuredSourceRequest):
     with session_scope() as db:
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
-            return {"source_id": existing.id, "job_id": None, "deduplicated": True}
+            conflict = (req.assignment_mode == "explicit_course" and existing.course_id != req.course_id) or (req.assignment_mode == "explicit_unassigned" and existing.course_id is not None)
+            return {"source_id": existing.id, "job_id": None, "deduplicated": True, "assignment_preserved": True, "assignment_conflict": conflict, "course_id": existing.course_id}
         metadata_json = json.dumps(req.metadata, ensure_ascii=False) if req.metadata else None
         domain_hint, topic_hint, description = _metadata_fields(req.metadata, req.domain_hint, req.topic_hint, req.description)
         src, job = _create_source(
-            db, name=req.name, source_type="transcript", course_id=req.course_id,
+            db, name=req.name, source_type="transcript", course_id=req.course_id, assignment_mode=req.assignment_mode,
             domain_hint=domain_hint, topic_hint=topic_hint, description=description,
             metadata_json=metadata_json, local_path=str(path), content_hash=digest,
         )
@@ -263,16 +483,57 @@ def add_structured_source(req: StructuredSourceRequest):
 
 
 @app.post("/sources/youtube")
-def add_youtube(url: HttpUrl, name: str | None = None, course_id: int | None = None,
+def add_youtube(url: HttpUrl, name: str | None = None, course_id: int | None = None, assignment_mode: Literal["auto", "explicit_course", "explicit_unassigned"] = "explicit_unassigned",
                 domain_hint: str | None = None, topic_hint: str | None = None, description: str | None = None,
                 metadata_json: str | None = None):
     with session_scope() as db:
+        canonical_url = canonical_youtube_url(str(url))
+        existing_sources = db.execute(
+            select(Source).where(Source.source_type == "youtube").order_by(Source.id.desc())
+        ).scalars().all()
+        existing = next((s for s in existing_sources if canonical_youtube_url(s.uri or "") == canonical_url), None)
+        if existing:
+            existing_job = db.execute(
+                select(Job).where(Job.source_id == existing.id).order_by(Job.id.desc()).limit(1)
+            ).scalar_one_or_none()
+            return {
+                "source_id": existing.id,
+                "job_id": existing_job.id if existing_job else None,
+                "status": existing_job.status if existing_job else existing.status,
+                "deduplicated": True,
+                "assignment_preserved": True,
+                "course_id": existing.course_id,
+                "assignment_conflict": (assignment_mode == "explicit_course" and course_id != existing.course_id) or (assignment_mode == "explicit_unassigned" and existing.course_id is not None),
+            }
         src, job = _create_source(
-            db, name=name or str(url), source_type="youtube", course_id=course_id,
+            db, name=name or str(url), source_type="youtube", course_id=course_id, assignment_mode=assignment_mode,
             domain_hint=domain_hint, topic_hint=topic_hint, description=description,
-            metadata_json=metadata_json, uri=str(url),
+            metadata_json=metadata_json, uri=canonical_url,
         )
         return {"source_id": src.id, "job_id": job.id, "status": "queued"}
+
+
+@app.post("/jobs/{job_id}/retry")
+def retry_job(job_id: int):
+    with session_scope() as db:
+        job = db.get(Job, job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        if job.status != "failed":
+            raise HTTPException(409, "Only failed jobs can be retried")
+        src = db.get(Source, job.source_id)
+        if not src:
+            raise HTTPException(409, "Job source no longer exists")
+        # Reset the automatic retry budget for this explicit resume while retaining
+        # checkpoints and completed embeddings/transcripts.
+        job.status = "queued"
+        job.retry_count = 0
+        job.error = None
+        job.error_message = None
+        job.updated_at = datetime.now(UTC)
+        src.status = "queued"
+        src.error = None
+        return {"job_id": job.id, "source_id": src.id, "status": job.status, "checkpoint": job.checkpoint}
 
 
 @app.get("/jobs")
@@ -280,21 +541,97 @@ def jobs():
     with session_scope() as db:
         rows = db.execute(select(Job).order_by(Job.id.desc())).scalars().all()
         sources = {s.id: s for s in db.execute(select(Source)).scalars().all()}
+        embedded_by_source = dict(db.execute(
+            select(Document.source_id, func.count(Chunk.id))
+            .join(Chunk, Chunk.document_id == Document.id)
+            .where(Chunk.chunk_kind == "leaf", Chunk.embedding_status == "done")
+            .group_by(Document.source_id)
+        ).all())
         return [
             {
                 "id": j.id,
                 "source_id": j.source_id,
                 "source_name": sources.get(j.source_id).name if sources.get(j.source_id) else None,
+                "source_type": sources.get(j.source_id).source_type if sources.get(j.source_id) else None,
+                "source_uri": sources.get(j.source_id).uri if sources.get(j.source_id) else None,
                 "course_id": sources.get(j.source_id).course_id if sources.get(j.source_id) else None,
                 "status": j.status,
                 "stage": j.stage,
-                "progress": f"{j.progress_current}/{j.progress_total}",
+                "progress": f"{embedded_by_source.get(j.source_id, 0) if j.stage == 'index' else j.progress_current}/{j.progress_total}",
                 "checkpoint": j.checkpoint,
+                "retry_count": j.retry_count,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+                "started_at": j.started_at.isoformat() if j.started_at else None,
+                "updated_at": j.updated_at.isoformat() if j.updated_at else None,
                 "plan": json.loads(j.plan_json) if j.plan_json else None,
-                "error": j.error,
+                "error_message": _job_error_message(j),
             }
             for j in rows
         ]
+
+
+def _job_error_message(job: Job) -> str | None:
+    detail = (job.error or "").lower()
+    if "429" in detail or "too many requests" in detail:
+        phase = "embedding" if "batchembedcontents" in detail or job.stage == "index" else job.stage.replace("_", " ")
+        if any(marker in detail for marker in ("perday", "per_day", "per day", "daily quota", "quota_exceeded", "daily limit")):
+            return f"Gemini reports its daily quota for {phase} is exhausted or unavailable. Automatic retries stopped. Daily quotas reset at midnight Pacific; if the limit is unavailable or zero, check the Gemini project/model quota. Choose Resume after recovery, or switch provider/model."
+        if job.status == "failed":
+            return f"Gemini rate limit or quota persisted during {phase}; automatic retries stopped after {settings.retry_max} attempts. Completed work is saved. Check Gemini usage, then choose Resume or switch provider/model."
+        return f"Gemini temporary rate limit during {phase}. LearnOS is retrying automatically ({job.retry_count}/{settings.retry_max})."
+    return job.error_message
+
+
+@app.post("/maintenance/organize-existing")
+def enqueue_existing_organization(include_unassigned: bool = True):
+    with session_scope() as db:
+        active = db.execute(select(MaintenanceJob).where(MaintenanceJob.task == "organize_existing", MaintenanceJob.status.in_(["queued", "running"])).order_by(MaintenanceJob.id.desc()).limit(1)).scalar_one_or_none()
+        if active:
+            return {"id": active.id, "status": active.status, "progress_current": active.progress_current, "progress_total": active.progress_total, "checkpoint": active.checkpoint, "deduplicated": True}
+        chunk_ids = db.execute(select(Chunk.id).join(Document, Chunk.document_id == Document.id).join(Source, Document.source_id == Source.id).where(Chunk.chunk_kind == "leaf", Chunk.embedding_status == "done", (Chunk.group_id.is_(None)) | (Chunk.classification_status != "done"), Source.status == "done").order_by(Chunk.id)).scalars().all()
+        done_sources = db.execute(select(Source).where(Source.status == "done").order_by(Source.id)).scalars().all()
+        source_items = []
+        for source in done_sources:
+            try:
+                profile = json.loads(source.profile_json or "{}")
+            except json.JSONDecodeError:
+                profile = {}
+            needs_profile = profile.get("schema_version") != 2
+            should_assign = source.course_id is None and (source.assignment_mode == "auto" or include_unassigned)
+            if needs_profile or should_assign:
+                source_item = {"kind": "source", "id": source.id}
+                if should_assign:
+                    # The user explicitly requested organization, so only unassigned sources
+                    # are eligible for metadata based placement. Existing assignments stay fixed.
+                    source_item["auto_assign_unassigned"] = source.assignment_mode != "auto"
+                source_items.append(source_item)
+        items = [{"kind": "chunk", "id": chunk_id} for chunk_id in chunk_ids] + source_items
+        row = MaintenanceJob(task="organize_existing", status="queued" if items else "done", progress_total=len(items), items_json=json.dumps(items))
+        db.add(row)
+        db.flush()
+        return {"id": row.id, "status": row.status, "progress_current": row.progress_current, "progress_total": row.progress_total, "checkpoint": row.checkpoint, "deduplicated": False}
+
+
+@app.get("/maintenance/jobs")
+def maintenance_jobs():
+    with session_scope() as db:
+        rows = db.execute(select(MaintenanceJob).order_by(MaintenanceJob.id.desc())).scalars().all()
+        return [{"id": row.id, "task": row.task, "status": row.status, "progress_current": row.progress_current, "progress_total": row.progress_total, "checkpoint": row.checkpoint, "errors": json.loads(row.errors_json or "{}"), "updated_at": row.updated_at.isoformat() if row.updated_at else None} for row in rows]
+
+
+@app.post("/maintenance/jobs/{job_id}/retry")
+def retry_maintenance_job(job_id: int):
+    with session_scope() as db:
+        row = db.get(MaintenanceJob, job_id)
+        if row is None:
+            raise HTTPException(404, "Maintenance job not found")
+        if row.status != "failed":
+            raise HTTPException(409, "Only failed maintenance jobs can be retried")
+        row.status = "queued"
+        row.progress_current = 0
+        row.checkpoint = None
+        row.errors_json = None
+        return {"id": row.id, "status": row.status}
 
 
 @app.get("/groups")
@@ -329,8 +666,28 @@ def knowledge_graph(course_id: int):
             select(ConceptRelation).where(
                 ConceptRelation.from_concept_id.in_(concept_ids),
                 ConceptRelation.to_concept_id.in_(concept_ids),
+                ConceptRelation.evidence_json.is_not(None),
             ).order_by(ConceptRelation.id)
         ).scalars().all()
+        course_chunk_ids = {
+            row[0]
+            for row in db.execute(
+                select(Chunk.id)
+                .join(Document, Chunk.document_id == Document.id)
+                .join(Source, Document.source_id == Source.id)
+                .where(Source.course_id == course_id, Chunk.chunk_kind == "leaf")
+            ).all()
+        }
+        supported_relations = []
+        for relation in relations:
+            try:
+                evidence = json.loads(relation.evidence_json or "{}")
+                evidence_ids = [int(chunk_id) for chunk_id in evidence.get("chunk_ids", [])]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            evidence_ids = [chunk_id for chunk_id in evidence_ids if chunk_id in course_chunk_ids]
+            if evidence_ids:
+                supported_relations.append((relation, evidence_ids))
         return {
             "course_id": course_id,
             "concepts": [
@@ -348,8 +705,9 @@ def knowledge_graph(course_id: int):
                     "to_concept_id": r.to_concept_id,
                     "type": r.relation_type,
                     "confidence": r.confidence,
+                    "evidence_chunk_ids": evidence_ids,
                 }
-                for r in relations
+                for r, evidence_ids in supported_relations
             ],
         }
 
@@ -380,26 +738,189 @@ def traces(run_id: str):
 @app.post("/study")
 def study(req: StudyRequest):
     with session_scope() as db:
-        return answer(db, provider(), req.question, req.group_id, req.top_k, req.course_id)
+        return answer(
+            db, provider(), req.question, req.group_id, req.top_k, req.course_id,
+            history=[turn.model_dump() for turn in req.history],
+            retrieval_scope=req.retrieval_scope,
+        )
 
 
 @app.get("/syllabus")
 def syllabus(course_id: int | None = None):
+    scope_key = f"course:{course_id}" if course_id is not None else "all"
+    # Frontend navigation, query refreshes, and multiple tabs can request the same
+    # stale plan at once. Build it once per scope; other callers read the result.
+    with _study_plan_lock(scope_key):
+        return _get_or_build_syllabus(course_id, scope_key)
+
+
+def _get_or_build_syllabus(course_id: int | None, scope_key: str):
     with session_scope() as db:
-        return {"syllabus": build_syllabus(db, provider(), course_id)}
+        sources_query = select(Source).where(Source.status == "done").order_by(Source.id)
+        if course_id is not None:
+            sources_query = sources_query.where(Source.course_id == course_id)
+        revisions = [(s.id, s.updated_at.isoformat() if s.updated_at else "") for s in db.execute(sources_query).scalars().all()]
+        if course_id is not None:
+            course_revision = db.get(Course, course_id)
+            if course_revision:
+                revisions.append(("course", course_revision.id, course_revision.updated_at.isoformat() if course_revision.updated_at else "", course_revision.outline or ""))
+        revision = hashlib.sha256(json.dumps(revisions).encode()).hexdigest()
+        plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope_key)).scalar_one_or_none()
+        if plan and plan.revision == revision:
+            nodes = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
+            try:
+                saved_relationships = json.loads(plan.relationships_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                saved_relationships = {}
+            if not isinstance(saved_relationships, dict):
+                saved_relationships = {"sources": saved_relationships if isinstance(saved_relationships, list) else []}
+            relationships = {
+                key: saved_relationships.get(key) if isinstance(saved_relationships.get(key), list) else []
+                for key in ("sources", "cross_paths", "shared_foundations")
+            }
+            return {"syllabus": plan.syllabus, "revision": revision, "generated_at": plan.generated_at.isoformat(), "nodes": [_study_plan_node_json(node) for node in nodes], "source_relationships": relationships}
+        rendered, structured_nodes = build_syllabus_structured(db, provider(), course_id)
+        relationships = {"sources": db.info.get("syllabus_source_relationships", []), "cross_paths": db.info.get("syllabus_cross_path_relations", []), "shared_foundations": db.info.get("syllabus_shared_foundations", [])}
+        if plan is None:
+            plan = StudyPlan(scope_key=scope_key, revision=revision, syllabus=rendered, relationships_json=json.dumps(relationships, ensure_ascii=False))
+            db.add(plan)
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                # Another process may have inserted the unique plan scope after
+                # our initial read. Re-read its result instead of surfacing a 500.
+                if "scope_key" not in str(exc.orig).lower():
+                    raise
+                db.rollback()
+                plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope_key)).scalar_one_or_none()
+                if plan is None:
+                    raise
+                if plan.revision == revision:
+                    nodes = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
+                    try:
+                        saved_relationships = json.loads(plan.relationships_json or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        saved_relationships = {}
+                    if not isinstance(saved_relationships, dict):
+                        saved_relationships = {"sources": saved_relationships if isinstance(saved_relationships, list) else []}
+                    response_relationships = {
+                        key: saved_relationships.get(key) if isinstance(saved_relationships.get(key), list) else []
+                        for key in ("sources", "cross_paths", "shared_foundations")
+                    }
+                    return {"syllabus": plan.syllabus, "revision": revision, "generated_at": plan.generated_at.isoformat(), "nodes": [_study_plan_node_json(node) for node in nodes], "source_relationships": response_relationships}
+                # Source data changed while the competing request was building;
+                # refresh the winner with the revision this request calculated.
+                plan.revision = revision
+                plan.syllabus = rendered
+                plan.relationships_json = json.dumps(relationships, ensure_ascii=False)
+                plan.generated_at = datetime.now(UTC)
+                db.query(StudyPlanNode).filter(StudyPlanNode.plan_id == plan.id).delete(synchronize_session=False)
+        else:
+            plan.revision = revision
+            plan.syllabus = rendered
+            plan.relationships_json = json.dumps(relationships, ensure_ascii=False)
+            plan.generated_at = datetime.now(UTC)
+            db.query(StudyPlanNode).filter(StudyPlanNode.plan_id == plan.id).delete(synchronize_session=False)
+        for node_data in structured_nodes:
+            db.add(StudyPlanNode(plan_id=plan.id, **node_data))
+        db.flush()
+        persisted = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
+        return {"syllabus": plan.syllabus, "revision": revision, "generated_at": plan.generated_at.isoformat(), "nodes": [_study_plan_node_json(node) for node in persisted], "source_relationships": relationships}
+
+
+def _study_plan_node_json(node: StudyPlanNode) -> dict:
+    return {"id": node.node_id, "parent_id": node.parent_node_id, "path_id": node.path_id, "type": node.node_type, "title": node.title, "metadata": json.loads(node.metadata_json or "{}")}
 
 
 @app.post("/study-pack")
 def study_pack(req: StudyPackRequest):
     with session_scope() as db:
-        text_value, refs = build_study_pack_prompt(db, provider(), req.course_id, req.topic, req.top_k)
+        plan_scope = f"course:{req.course_id}" if req.course_id is not None else "all"
+        plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == plan_scope)).scalar_one_or_none()
+        if req.topic_id:
+            node = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id, StudyPlanNode.node_id == req.topic_id)).scalar_one_or_none() if plan else None
+            if node is None:
+                raise HTTPException(404, "Study Plan topic not found")
+            if node.node_type != "study":
+                raise HTTPException(422, "Outline topics cannot be prepared as study packs; choose one of their study topics")
+            req.topic = node.title
+        elif plan:
+            outline = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id, StudyPlanNode.node_type == "outline", func.lower(StudyPlanNode.title) == req.topic.strip().lower())).scalar_one_or_none()
+            if outline:
+                raise HTTPException(422, "Outline topics cannot be prepared as study packs; choose one of their study topics")
+        scope_course = None if req.retrieval_scope == "all_sources" else req.course_id
+        text_value, refs = build_study_pack_prompt(db, provider(), scope_course, req.topic, req.top_k, req.retrieval_scope)
         return {"topic": req.topic, "study_text": text_value, "sources": refs, "copy_paste_ready": True}
+
+
+@app.post("/study-pack/export")
+def export_study_pack(req: ExternalStudyPackRequest):
+    with session_scope() as db:
+        plan_scope = f"course:{req.course_id}" if req.course_id is not None else "all"
+        plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == plan_scope)).scalar_one_or_none()
+        if req.topic_id:
+            node = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id, StudyPlanNode.node_id == req.topic_id)).scalar_one_or_none() if plan else None
+            if node is None:
+                raise HTTPException(404, "Study Plan topic not found")
+            if node.node_type != "study":
+                raise HTTPException(422, "Outline topics cannot be exported as study packs")
+            req.topic = node.title
+        elif plan:
+            outline = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id, StudyPlanNode.node_type == "outline", func.lower(StudyPlanNode.title) == req.topic.strip().lower())).scalar_one_or_none()
+            if outline:
+                raise HTTPException(422, "Outline topics cannot be exported as study packs")
+        text_value, refs, meta = build_external_study_pack(
+            db, provider(), None if req.retrieval_scope == "all_sources" else req.course_id, req.topic, req.top_k, req.tutor, req.max_input_tokens, req.retrieval_scope,
+        )
+        return {"topic": req.topic, "study_text": text_value, "sources": refs, "copy_paste_ready": True, **meta}
+
+
+def _study_scope(course_id: int | None) -> str:
+    return f"course:{course_id}" if course_id is not None else "all"
+
+
+@app.get("/study-progress")
+def study_progress(course_id: int | None = None):
+    with session_scope() as db:
+        rows = db.execute(select(StudyProgress).where(
+            StudyProgress.scope_key == _study_scope(course_id), StudyProgress.completed.is_(True)
+        )).scalars().all()
+        return {"completed_topics": [row.topic_label for row in rows]}
+
+
+@app.post("/study-progress")
+def update_study_progress(req: StudyProgressRequest):
+    topic_key = " ".join(req.topic.casefold().split())
+    with session_scope() as db:
+        row = db.execute(select(StudyProgress).where(
+            StudyProgress.scope_key == _study_scope(req.course_id), StudyProgress.topic_key == topic_key
+        )).scalar_one_or_none()
+        if req.completed:
+            if row is None:
+                db.add(StudyProgress(scope_key=_study_scope(req.course_id), topic_key=topic_key, topic_label=req.topic.strip(), completed=True))
+            else:
+                row.topic_label = req.topic.strip()
+                row.completed = True
+        elif row is not None:
+            db.delete(row)
+        return {"topic": req.topic, "completed": req.completed}
 
 
 @app.get("/courses/{course_id}/stats")
 def course_stats(course_id: int):
     with session_scope() as db:
         sources = db.execute(select(Source).where(Source.course_id == course_id)).scalars().all()
+        unique_youtube: dict[str, Source] = {}
+        other_sources: list[Source] = []
+        for source in sources:
+            if source.source_type != "youtube":
+                other_sources.append(source)
+                continue
+            key = canonical_youtube_url(source.uri or source.name)
+            current = unique_youtube.get(key)
+            if current is None or (source.status == "done" and current.status != "done"):
+                unique_youtube[key] = source
+        sources = other_sources + list(unique_youtube.values())
         source_ids = {s.id for s in sources}
         docs = db.execute(
             select(Document).where(Document.source_id.in_(source_ids) if source_ids else False)
@@ -427,6 +948,7 @@ def course_stats(course_id: int):
             .where(
                 ConceptRelation.from_concept_id.in_(concept_ids),
                 ConceptRelation.to_concept_id.in_(concept_ids),
+                ConceptRelation.evidence_json.is_not(None),
             )
         ).scalars().all() if concept_ids else []
         return {
