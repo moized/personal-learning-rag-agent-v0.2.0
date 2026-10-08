@@ -15,6 +15,7 @@ from .ingestion import parse_file, chunk_text, list_youtube_videos, fetch_youtub
 from .grouping import choose_group, extract_group_concepts, merge_centroid
 from .knowledge_graph import add_sequence_relations, extract_source_relations
 from .agent import set_plan
+from .reliability import is_retryable_error, profile_needs_refresh
 
 
 class Worker(threading.Thread):
@@ -136,7 +137,7 @@ class Worker(threading.Thread):
                                 profile = json.loads(source.profile_json or "{}")
                             except json.JSONDecodeError:
                                 profile = {}
-                            if profile.get("schema_version") != 2:
+                            if profile_needs_refresh(profile):
                                 self._ensure_source_profile(db, source, ai)
                             if source.course_id is None and (source.assignment_mode == "auto" or item.get("auto_assign_unassigned")):
                                 self._auto_group_source(db, source, ai, force=bool(item.get("auto_assign_unassigned")))
@@ -192,7 +193,9 @@ Return an available course_id only when the match is strong and confidence >= 0.
                 new_name = str(result.get("new_course_name") or "").strip()[:500]
                 if confidence < 0.65 or course_id not in {course.id for course in courses}:
                     course_id = None
-            except Exception:
+            except Exception as exc:
+                if is_retryable_error(exc):
+                    raise
                 logging.exception("AI source-to-course classification failed; using profile fallback")
         if course_id is None:
             suggested_groups = profile.get("suggested_group_names") or []
@@ -410,7 +413,7 @@ Return an available course_id only when the match is strong and confidence >= 0.
             current_profile = json.loads(src.profile_json or "{}")
         except json.JSONDecodeError:
             current_profile = {}
-        if current_profile.get("schema_version") == 2:
+        if not profile_needs_refresh(current_profile):
             return
         chunks = db.execute(
             select(Chunk)
@@ -513,9 +516,14 @@ Return JSON containing author, provider/institution, domain, subdomain, estimate
                             "field_provenance": {"title": "source_metadata", "source_type": "source_metadata", "author": "inferred" if "author" in profile.get("inferred_fields", []) else ("unknown" if not profile.get("author") else "source_content"), "institution": "inferred" if "institution" in profile.get("inferred_fields", []) else ("unknown" if not profile.get("institution") else "source_content"), "course_title": "inferred" if "course_title" in profile.get("inferred_fields", []) else ("unknown" if not profile.get("course_title") else "source_content")},
                             "web_evidence": web_evidence})
             src.profile_json = json.dumps(profile, ensure_ascii=False)
-        except Exception:
+        except Exception as exc:
+            # A temporary outage must fail the job so it is retried. Saving the empty
+            # fallback as a finished profile would lock the source out of organisation.
+            if is_retryable_error(exc):
+                raise
+            logging.exception("Source profiling failed for source %s; saved a degraded profile that will be retried", src.id)
             src.profile_json = json.dumps(
-                {"schema_version": 2, "source_id": src.id, "title": explicit_title, "source_type": src.source_type,
+                {"schema_version": 2, "degraded": True, "source_id": src.id, "title": explicit_title, "source_type": src.source_type,
                  "domain": src.domain_hint or "", "subdomain": "", "topics": [src.topic_hint] if src.topic_hint else [],
                  "estimated_level": "", "course_title": "", "primary_learning_goal": "", "learning_objectives": [],
                  "expected_prerequisites": [], "learner_capabilities": [], "downstream_applications": [], "source_role": "unknown",

@@ -17,6 +17,7 @@ from .services.queue import enqueue
 from .services.worker import Worker
 from .providers.factory import provider
 from .routers.learner import router as learner_router
+from .services.reliability import profile_needs_refresh
 from .services.study import answer
 from .services.curriculum import build_syllabus, build_syllabus_structured, build_study_pack_prompt, build_external_study_pack
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url
@@ -598,7 +599,7 @@ def enqueue_existing_organization(include_unassigned: bool = True):
                 profile = json.loads(source.profile_json or "{}")
             except json.JSONDecodeError:
                 profile = {}
-            needs_profile = profile.get("schema_version") != 2
+            needs_profile = profile_needs_refresh(profile)
             should_assign = source.course_id is None and (source.assignment_mode == "auto" or include_unassigned)
             if needs_profile or should_assign:
                 source_item = {"kind": "source", "id": source.id}
@@ -757,6 +758,29 @@ def syllabus(course_id: int | None = None, regenerate: bool = False):
         return _get_or_build_syllabus(course_id, scope_key, force=regenerate)
 
 
+def _plan_response(plan: StudyPlan, nodes: list[StudyPlanNode]) -> dict:
+    """Shape a stored plan for the API, tolerating older relationship formats."""
+    try:
+        saved = json.loads(plan.relationships_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {"sources": saved if isinstance(saved, list) else []}
+    relationships = {
+        key: saved.get(key) if isinstance(saved.get(key), list) else []
+        for key in ("sources", "cross_paths", "shared_foundations")
+    }
+    warnings = [w for w in saved["warnings"] if isinstance(w, str)] if isinstance(saved.get("warnings"), list) else []
+    return {
+        "syllabus": plan.syllabus, "revision": plan.revision, "generated_at": plan.generated_at.isoformat(),
+        "nodes": [_study_plan_node_json(node) for node in nodes],
+        "source_relationships": relationships,
+        # Parts of the plan that could not be built (for example the AI service was
+        # unavailable). The plan is still saved so it can be shown; Refresh rebuilds it.
+        "warnings": warnings,
+    }
+
+
 def _get_or_build_syllabus(course_id: int | None, scope_key: str, force: bool = False):
     with session_scope() as db:
         sources_query = select(Source).where(Source.status == "done").order_by(Source.id)
@@ -769,23 +793,30 @@ def _get_or_build_syllabus(course_id: int | None, scope_key: str, force: bool = 
                 revisions.append(("course", course_revision.id, course_revision.updated_at.isoformat() if course_revision.updated_at else "", course_revision.outline or ""))
         revision = hashlib.sha256(json.dumps(revisions).encode()).hexdigest()
         plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope_key)).scalar_one_or_none()
+
+        def stored_nodes() -> list[StudyPlanNode]:
+            return db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
+
         if plan and plan.revision == revision and not force:
-            nodes = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
-            try:
-                saved_relationships = json.loads(plan.relationships_json or "{}")
-            except (TypeError, json.JSONDecodeError):
-                saved_relationships = {}
-            if not isinstance(saved_relationships, dict):
-                saved_relationships = {"sources": saved_relationships if isinstance(saved_relationships, list) else []}
-            relationships = {
-                key: saved_relationships.get(key) if isinstance(saved_relationships.get(key), list) else []
-                for key in ("sources", "cross_paths", "shared_foundations")
-            }
-            return {"syllabus": plan.syllabus, "revision": revision, "generated_at": plan.generated_at.isoformat(), "nodes": [_study_plan_node_json(node) for node in nodes], "source_relationships": relationships}
+            return _plan_response(plan, stored_nodes())
         rendered, structured_nodes = build_syllabus_structured(db, provider(), course_id)
-        relationships = {"sources": db.info.get("syllabus_source_relationships", []), "cross_paths": db.info.get("syllabus_cross_path_relations", []), "shared_foundations": db.info.get("syllabus_shared_foundations", [])}
+        relationships = {
+            "sources": db.info.get("syllabus_source_relationships", []),
+            "cross_paths": db.info.get("syllabus_cross_path_relations", []),
+            "shared_foundations": db.info.get("syllabus_shared_foundations", []),
+            "warnings": db.info.get("syllabus_warnings", []),
+        }
+        relationships_json = json.dumps(relationships, ensure_ascii=False)
+
+        def overwrite(existing: StudyPlan) -> None:
+            existing.revision = revision
+            existing.syllabus = rendered
+            existing.relationships_json = relationships_json
+            existing.generated_at = datetime.now(UTC)
+            db.query(StudyPlanNode).filter(StudyPlanNode.plan_id == existing.id).delete(synchronize_session=False)
+
         if plan is None:
-            plan = StudyPlan(scope_key=scope_key, revision=revision, syllabus=rendered, relationships_json=json.dumps(relationships, ensure_ascii=False))
+            plan = StudyPlan(scope_key=scope_key, revision=revision, syllabus=rendered, relationships_json=relationships_json)
             db.add(plan)
             try:
                 db.flush()
@@ -798,37 +829,17 @@ def _get_or_build_syllabus(course_id: int | None, scope_key: str, force: bool = 
                 plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope_key)).scalar_one_or_none()
                 if plan is None:
                     raise
-                if plan.revision == revision:
-                    nodes = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
-                    try:
-                        saved_relationships = json.loads(plan.relationships_json or "{}")
-                    except (TypeError, json.JSONDecodeError):
-                        saved_relationships = {}
-                    if not isinstance(saved_relationships, dict):
-                        saved_relationships = {"sources": saved_relationships if isinstance(saved_relationships, list) else []}
-                    response_relationships = {
-                        key: saved_relationships.get(key) if isinstance(saved_relationships.get(key), list) else []
-                        for key in ("sources", "cross_paths", "shared_foundations")
-                    }
-                    return {"syllabus": plan.syllabus, "revision": revision, "generated_at": plan.generated_at.isoformat(), "nodes": [_study_plan_node_json(node) for node in nodes], "source_relationships": response_relationships}
+                if plan.revision == revision and not force:
+                    return _plan_response(plan, stored_nodes())
                 # Source data changed while the competing request was building;
                 # refresh the winner with the revision this request calculated.
-                plan.revision = revision
-                plan.syllabus = rendered
-                plan.relationships_json = json.dumps(relationships, ensure_ascii=False)
-                plan.generated_at = datetime.now(UTC)
-                db.query(StudyPlanNode).filter(StudyPlanNode.plan_id == plan.id).delete(synchronize_session=False)
+                overwrite(plan)
         else:
-            plan.revision = revision
-            plan.syllabus = rendered
-            plan.relationships_json = json.dumps(relationships, ensure_ascii=False)
-            plan.generated_at = datetime.now(UTC)
-            db.query(StudyPlanNode).filter(StudyPlanNode.plan_id == plan.id).delete(synchronize_session=False)
+            overwrite(plan)
         for node_data in structured_nodes:
             db.add(StudyPlanNode(plan_id=plan.id, **node_data))
         db.flush()
-        persisted = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
-        return {"syllabus": plan.syllabus, "revision": revision, "generated_at": plan.generated_at.isoformat(), "nodes": [_study_plan_node_json(node) for node in persisted], "source_relationships": relationships}
+        return _plan_response(plan, stored_nodes())
 
 
 def _study_plan_node_json(node: StudyPlanNode) -> dict:

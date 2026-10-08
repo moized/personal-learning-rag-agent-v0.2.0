@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from ..models import Chunk, Group, Concept, Evidence
 from ..providers.base import AIProvider
 from ..config import settings
+from .reliability import is_retryable_error
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -129,7 +130,10 @@ Return 5-30 canonical concepts, each with a one-sentence description and optiona
     }
     try:
         result = ai.generate_json(prompt, task="extraction", schema=schema)
-    except Exception:
+    except Exception as exc:
+        # Returning 0 here would let the worker mark the group as indexed with no concepts.
+        if is_retryable_error(exc):
+            raise
         return 0
     count = 0
     for item in result.get("concepts", []):

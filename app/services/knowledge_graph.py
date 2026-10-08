@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..models import Chunk, ChunkRelation, Concept, ConceptRelation, Evidence, Document, Source
 from ..providers.base import AIProvider
 from ..config import settings
+from .reliability import is_retryable_error
 
 
 RELATION_TYPES = {"prerequisite", "parallel", "related", "contradicts"}
@@ -286,7 +287,9 @@ Return JSON with a relationships array. Each relationship must use:
 
     try:
         result = ai.generate_json(prompt, task="relationship_extraction", schema=schema)
-    except Exception:
+    except Exception as exc:
+        if is_retryable_error(exc):
+            raise
         return 0
 
     concept_ids = {concept.id for concept in by_name.values()}

@@ -14,6 +14,12 @@ RELATION_TYPES = {
     "SAME_DOMAIN_DIFFERENT_COURSE", "RELATED_BUT_SEPARATE", "UNRELATED",
 }
 MERGE_TYPES = {"SAME_COURSE", "SAME_LEARNING_PATH", "COMPLEMENTARY_RESOURCE"}
+_UNCLASSIFIED_RATIONALE = "Not enough evidence to confirm a shared learning path."
+
+
+def _is_unclassified_default(row: SourceRelationship) -> bool:
+    """A guess saved when the AI call failed or skipped a pair; such rows are always asked again."""
+    return row.confidence == 0.2 and row.rationale == _UNCLASSIFIED_RATIONALE
 
 
 def _profile(source: Source) -> dict:
@@ -72,7 +78,8 @@ def _source_data(db: Session, sources: list[Source]) -> list[dict]:
     return data
 
 
-def _classify_relationships(db: Session, ai: AIProvider, sources: list[dict]) -> list[dict]:
+def _classify_relationships(db: Session, ai: AIProvider, sources: list[dict], warnings: list[str] | None = None) -> list[dict]:
+    warnings = [] if warnings is None else warnings
     by_id = {row["id"]: row for row in sources}
     ids = sorted(by_id)
     pairs = list(itertools.combinations(ids, 2))
@@ -80,13 +87,14 @@ def _classify_relationships(db: Session, ai: AIProvider, sources: list[dict]) ->
     stale = []
     for row in db.execute(select(SourceRelationship).where(SourceRelationship.source_a_id.in_(ids), SourceRelationship.source_b_id.in_(ids))).scalars().all():
         expected_hashes = (_digest(by_id[row.source_a_id]["profile"]), _digest(by_id[row.source_b_id]["profile"]))
-        if expected_hashes != (row.source_a_profile_hash, row.source_b_profile_hash):
+        if expected_hashes != (row.source_a_profile_hash, row.source_b_profile_hash) or _is_unclassified_default(row):
             stale.append(row)
         else:
             existing[(row.source_a_id, row.source_b_id)] = row
     for row in stale:
         db.delete(row)
     missing = [pair for pair in pairs if pair not in existing]
+    provisional: list[dict] = []
     if missing:
         identity_fields = ("author", "institution", "provider", "source_type", "domain", "subdomain", "course_title",
                            "course_identity_confidence", "primary_learning_goal", "learning_intent_confidence",
@@ -115,8 +123,15 @@ Return JSON relationships with source_a_id, source_b_id, type, confidence (0..1)
                 generated[(a, b)] = item
         except Exception:
             generated = {}
+            warnings.append("The AI service was unavailable while comparing sources, so they are shown as separate paths for now.")
         for a, b in missing:
-            item = generated.get((a, b), {})
+            item = generated.get((a, b))
+            if item is None:
+                # Nothing was learned about this pair. Show it as separate in this plan only:
+                # saving the guess would stop the pair from ever being compared again.
+                provisional.append({"source_a_id": a, "source_b_id": b, "relation_type": "RELATED_BUT_SEPARATE",
+                                    "confidence": 0.2, "rationale": _UNCLASSIFIED_RATIONALE, "evidence": [], "provisional": True})
+                continue
             relation = str(item.get("type", "RELATED_BUT_SEPARATE")).upper()
             if relation not in RELATION_TYPES:
                 relation = "RELATED_BUT_SEPARATE"
@@ -132,10 +147,12 @@ Return JSON relationships with source_a_id, source_b_id, type, confidence (0..1)
             )
             db.add(row)
             existing[(a, b)] = row
+        if provisional and not any("comparing sources" in w for w in warnings):
+            warnings.append(f"{len(provisional)} source pair(s) could not be compared yet and are shown as separate.")
         # Keep relationship writes pending until the caller persists the completed
         # plan. Flushing here would hold SQLite's single-writer lock through the
         # independent curriculum and synthesis model calls below.
-    return [{"source_a_id": row.source_a_id, "source_b_id": row.source_b_id, "relation_type": row.relation_type,
+    return provisional + [{"source_a_id": row.source_a_id, "source_b_id": row.source_b_id, "relation_type": row.relation_type,
              "confidence": row.confidence, "rationale": row.rationale, "evidence": json.loads(row.evidence_json or "[]")}
             for row in existing.values()]
 
@@ -200,7 +217,8 @@ def build_syllabus_structured(db: Session, ai: AIProvider, course_id: int | None
     if not source_rows:
         return "No completed sources are available in this scope yet.", []
     sources = _source_data(db, source_rows)
-    relationships = _classify_relationships(db, ai, sources)
+    warnings: list[str] = []
+    relationships = _classify_relationships(db, ai, sources, warnings)
     source_paths = group_source_paths([item["id"] for item in sources], relationships)
     by_id = {item["id"]: item for item in sources}
 
@@ -216,6 +234,7 @@ Return nodes plus knowledge, skills, capabilities, and applications. Every node 
         try:
             curriculum = ai.generate_json(prompt, task="syllabus", schema=_curriculum_schema())
         except Exception:
+            warnings.append(f"Could not extract topics from '{item['name']}' because the AI service returned an error.")
             curriculum = {"nodes": [], "knowledge": [], "skills": [], "capabilities": [], "applications": []}
         independent.append({"source_id": sid, "title": item["name"], "profile": profile, **curriculum})
 
@@ -244,6 +263,7 @@ Source identity classifications: {json.dumps(relationships, ensure_ascii=False)}
     try:
         result = ai.generate_json(prompt, task="syllabus", schema=schema)
     except Exception:
+        warnings.append("Could not merge the sources into one plan, so each source's own topics are shown.")
         result = {"paths": [{"path_id": path["path_id"], "title": path["suggested_title"], "source_ids": path["source_ids"],
                   "primary_goal": path["suggested_title"], "knowledge": [], "skills": [], "capabilities": [], "applications": [],
                   "nodes": [node for item in path["source_curricula"] for node in item.get("nodes", [])]} for path in path_inputs],
@@ -310,6 +330,9 @@ Source identity classifications: {json.dumps(relationships, ensure_ascii=False)}
         meta = json.loads(node["metadata_json"] or "{}")
         values = [str(number), node["node_id"], node["parent_node_id"] or "none", node["title"], node["node_type"], meta.get("purpose", ""), meta.get("prerequisites", ""), meta.get("parallel", ""), ", ".join(meta.get("source_groups", []))]
         rows.append("| " + " | ".join(str(value).replace("|", "\\|").replace("\n", " ") for value in values) + " |")
+    if not any(node["node_type"] == "study" for node in persisted):
+        warnings.append("No study topics could be extracted from these sources yet.")
+    db.info["syllabus_warnings"] = list(dict.fromkeys(warnings))
     db.info["syllabus_cross_path_relations"] = result.get("cross_path_relations", [])
     db.info["syllabus_shared_foundations"] = result.get("shared_foundations", [])
     db.info["syllabus_source_relationships"] = relationships
