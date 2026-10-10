@@ -55,3 +55,11 @@
 .learn-chip.unseen{background:#f6f6f2}.learn-chip.unseen i{background:#cfd2c9}.learn-chip.learning i{background:#d6b25f}.learn-chip.due{border-color:#ecc9b6;background:var(--orange-soft)}.learn-chip.due i{background:#d58b63}.learn-chip.mastered{background:var(--green-soft);border-color:#cfdccf}.learn-chip.mastered i{background:var(--green)}
 @media(max-width:760px){.learn-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.learn-row{flex-direction:column;align-items:flex-start}.learn-row-actions{flex-wrap:wrap}}
 .plan-warning{margin:14px 0 0;padding:12px 14px;border:1px solid #efddd2;border-radius:11px;background:var(--orange-soft);color:#8d4d32;font-size:12px;line-height:1.55}.plan-warning ul{margin:6px 0;padding-left:18px}.plan-warning span{display:block;color:#92796e}
+/* Library status groups and recovery actions */
+.library-section{margin-top:22px}.library-section .attention-heading h3{margin:0;color:#3f4a3f;font-size:14px}.library-section .attention-heading p{margin:5px 0 0;color:#7c8278;font-size:11px;line-height:1.5}
+.source-placement{margin-top:7px;color:#6f756b;font-size:11px;line-height:1.5}.source-placement strong{color:#3f4a3f;font-weight:620}
+.source-issue-note{margin-top:7px;color:#9a6a24;font-size:11px;line-height:1.5}
+.source-issues{margin-top:8px;font-size:11px}.source-issues summary{cursor:pointer;color:#6b7266;font-weight:620}.source-issues ul{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:8px}.source-issues li{display:grid;gap:7px;padding:9px 10px;border:1px solid #efe4da;border-radius:9px;background:#fffdfb}.source-issues li>div{display:grid;gap:2px}.source-issues li span{color:#8a7a70}.source-issues .btn{justify-self:start;min-height:30px;padding:5px 9px;font-size:11px}
+.paste-form{display:grid;gap:8px;margin-top:9px}.paste-form .paste-input{min-height:120px}.paste-form-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.paste-form-actions .text-input{width:auto;min-height:34px;padding:5px 8px;font-size:11px}.paste-form-actions .btn{min-height:34px;padding:6px 10px;font-size:11px}
+.status-dot.needs_input{background:#c26b47}
+.source-card{flex-wrap:wrap}.source-card-content{flex:1 1 260px}.source-card-actions{flex-wrap:wrap}

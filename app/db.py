@@ -53,7 +53,7 @@ def _migrate_sqlite() -> None:
             conn.execute(text("UPDATE sources SET assignment_mode=CASE WHEN course_id IS NULL THEN 'explicit_unassigned' ELSE 'explicit_course' END"))
             conn.execute(text("UPDATE sources SET assignment_status=CASE WHEN course_id IS NULL THEN 'unassigned' ELSE 'assigned' END"))
     _add_missing_columns("groups", {"keywords_json": "keywords_json TEXT"})
-    _add_missing_columns("documents", {"summary": "summary TEXT"})
+    _add_missing_columns("documents", {"summary": "summary TEXT", "metadata_json": "metadata_json TEXT"})
     _add_missing_columns("chunks", {
         "parent_chunk_id": "parent_chunk_id INTEGER",
         "chunk_kind": "chunk_kind VARCHAR(20) DEFAULT 'leaf'",

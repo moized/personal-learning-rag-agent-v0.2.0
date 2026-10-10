@@ -73,6 +73,8 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String(30), default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Platform facts such as title, channel, upload date and duration, plus transcript origin.
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Chunk(Base):

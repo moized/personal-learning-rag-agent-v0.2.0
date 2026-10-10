@@ -201,27 +201,93 @@ def canonical_youtube_url(url: str) -> str:
     return url
 
 
-def list_youtube_videos(url: str) -> list[tuple[str, str]]:
+def _iso_date(value) -> str | None:
+    """yt-dlp dates look like 20240115."""
+    value = str(value or "")
+    return f"{value[:4]}-{value[4:6]}-{value[6:8]}" if re.fullmatch(r"\d{8}", value) else None
+
+
+def _video_entry(info: dict) -> dict:
+    duration = info.get("duration")
+    return {
+        "id": info["id"],
+        "title": info.get("title") or info["id"],
+        "channel": info.get("channel") or info.get("uploader") or "",
+        "upload_date": _iso_date(info.get("upload_date") or info.get("release_date")),
+        "duration_seconds": int(duration) if isinstance(duration, (int, float)) else None,
+    }
+
+
+def list_youtube_entries(url: str) -> tuple[dict, list[dict]]:
+    """Return (source info, videos) for a YouTube video or playlist.
+
+    Titles, channel and upload date are included when YouTube provides them. For a
+    single video the metadata lookup is best-effort: its transcript can still be
+    fetched without it, so a metadata failure falls back to the video ID.
+    """
     if (urlparse(url).hostname or "").lower() not in YOUTUBE_HOSTS:
         raise ValueError("URL must be a YouTube video or playlist URL")
     if not youtube_is_playlist(url):
         vid = youtube_video_id(url)
         if not vid:
             raise ValueError("Could not parse YouTube video URL")
-        return [(vid, vid)]
+        try:
+            from yt_dlp import YoutubeDL
+            options = {"quiet": True, "no_warnings": True, "skip_download": True, "ignore_no_formats_error": True}
+            with YoutubeDL(options) as ydl:
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False) or {}
+            entry = _video_entry({**info, "id": vid})
+        except Exception:
+            entry = {"id": vid, "title": vid, "channel": "", "upload_date": None, "duration_seconds": None}
+        title = entry["title"] if entry["title"] != vid else ""
+        return {"kind": "video", "title": title, "channel": entry["channel"], "upload_date": entry["upload_date"]}, [entry]
     try:
         from yt_dlp import YoutubeDL
         with YoutubeDL({"quiet": True, "extract_flat": True, "skip_download": True}) as ydl:
-            info = ydl.extract_info(url, download=False)
-        videos = [(entry["id"], entry.get("title") or entry["id"]) for entry in (info or {}).get("entries", []) if entry and entry.get("id")]
+            info = ydl.extract_info(url, download=False) or {}
+        videos = [_video_entry(entry) for entry in info.get("entries", []) if entry and entry.get("id")]
         if not videos:
             raise ValueError("Playlist contains no accessible videos")
-        return videos
     except Exception as exc:
         raise RuntimeError(f"Playlist expansion failed: {exc}") from exc
+    source_info = {"kind": "playlist", "title": info.get("title") or "", "channel": info.get("channel") or info.get("uploader") or "",
+                   "upload_date": _iso_date(info.get("modified_date"))}
+    return source_info, videos
+
+
+def list_youtube_videos(url: str) -> list[tuple[str, str]]:
+    """(video_id, title) pairs for a YouTube video or playlist."""
+    return [(video["id"], video["title"]) for video in list_youtube_entries(url)[1]]
+
+
+class TranscriptUnavailable(RuntimeError):
+    """The video itself has no usable transcript. Retrying will not help; the user can paste one."""
+
+    def __init__(self, message: str, user_message: str):
+        super().__init__(message)
+        self.user_message = user_message
+
+
+# youtube-transcript-api errors that describe the video, not a temporary block such as
+# IpBlocked or RequestBlocked. Matched by name so the private error module is not imported.
+_UNAVAILABLE_TRANSCRIPT_MESSAGES = {
+    "NoTranscriptFound": "This video has no captions.",
+    "TranscriptsDisabled": "Captions are turned off for this video.",
+    "VideoUnavailable": "The video is unavailable (private, removed or region-blocked).",
+    "VideoUnplayable": "The video cannot be played, so its captions cannot be read.",
+    "InvalidVideoId": "The video ID is not valid.",
+    "AgeRestricted": "The video is age-restricted, so its captions cannot be read without signing in.",
+    "NotTranslatable": "No usable captions were found.",
+    "TranslationLanguageNotAvailable": "No usable captions were found.",
+}
 
 
 def fetch_youtube_transcript(video_id: str, languages=("en", "tr")) -> str:
+    """Fetch a transcript, preferring `languages`, then any language (human-made first).
+
+    Raises TranscriptUnavailable when the video has no usable captions, and a plain
+    RuntimeError for temporary failures that a later retry may fix.
+    """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError as exc:
@@ -234,4 +300,17 @@ def fetch_youtube_transcript(video_id: str, languages=("en", "tr")) -> str:
             return " ".join(sn.text for sn in transcript)
         except Exception as exc:
             last_err = exc
-    raise RuntimeError(f"Transcript unavailable for {video_id}: {last_err}")
+            if type(exc).__name__ != "NoTranscriptFound":
+                break  # disabled, unavailable or blocked: other languages fail the same way
+    if last_err is not None and type(last_err).__name__ == "NoTranscriptFound":
+        try:
+            available = sorted(api.list(video_id), key=lambda item: bool(getattr(item, "is_generated", True)))
+            if available:
+                return " ".join(sn.text for sn in available[0].fetch())
+        except Exception as exc:
+            last_err = exc
+    message = f"Transcript unavailable for {video_id}: {last_err}"
+    reason = _UNAVAILABLE_TRANSCRIPT_MESSAGES.get(type(last_err).__name__)
+    if reason:
+        raise TranscriptUnavailable(message, reason) from last_err
+    raise RuntimeError(message) from last_err

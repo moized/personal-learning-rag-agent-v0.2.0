@@ -1,6 +1,6 @@
 import {useEffect,useMemo,useRef,useState,type FormEvent,type KeyboardEvent,type ReactNode} from "react"
 import {Brain,Check,Copy,FileText,FolderOpen,GraduationCap,Library,LoaderCircle,MessageSquare,Paperclip,Plus,RefreshCw,Send,Sparkles,Trash2,UploadCloud,X} from "lucide-react"
-import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type Source,type StudyPackExport} from "./lib/api"
+import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type PasteFormat,type Source,type StudyPackExport} from "./lib/api"
 import LearnView from "./Learn"
 
 type View="chat"|"library"|"plan"|"learn"
@@ -21,10 +21,11 @@ function Button({children,onClick,variant="primary",disabled=false,type="button"
 }
 function Badge({children}:{children:ReactNode}){return <span className="badge">{children}</span>}
 function stageLabel(stage:string){return ({structure:"Preparing source",transcript:"Getting transcript",index:"Indexing content",organize:"Organizing notes",concepts:"Finding key ideas",graph:"Connecting ideas",done:"Ready"} as Record<string,string>)[stage]||"Working"}
-function statusLabel(status:string){return status==="done"?"Ready":status==="failed"?"Needs attention":status==="retrying"?"Retrying":status==="running"||status==="processing"?"In progress":"Queued"}
+function statusLabel(status:string){return status==="done"?"Ready":status==="needs_input"?"Needs your input":status==="failed"?"Needs attention":status==="retrying"?"Retrying":status==="running"||status==="processing"?"In progress":"Queued"}
 function sourceTitle(source:Pick<Source,"name"|"source_type">|Pick<Job,"source_name"|"source_type"|"source_uri">){
   const name="name" in source?source.name:source.source_name
   if(source.source_type!=="youtube")return name||"Source"
+  if(name&&!/^https?:\/\//i.test(name))return name
   const uri="source_uri" in source?source.source_uri:name
   try{const url=new URL(uri||"");const playlist=url.searchParams.get("list");const id=url.hostname==="youtu.be"?url.pathname.slice(1):url.searchParams.get("v");return playlist?`YouTube playlist · ${playlist}`:id?`YouTube video · ${id}`:"YouTube source"}catch{return "YouTube source"}
 }
@@ -393,17 +394,77 @@ function LibraryView({sources,courses,jobs,failedJobs,retryingJob,retry,refresh,
   const retryOrganization=async()=>{if(!maintenanceJobId)return;try{await api.retryMaintenanceJob(maintenanceJobId);setMaintenanceProgress(value=>value?{...value,status:"queued",progress_current:0,errors:{}}:value);setMaintenanceNotice("Organization retry queued.")}catch(e){setMaintenanceNotice(e instanceof Error?e.message:"Could not retry organization")}}
   const latestBySource=new Map(jobs.map(job=>[job.source_id,job]))
   const failedIds=new Set(failedJobs.map(job=>job.source_id))
-  const attention=sources.filter(source=>source.status==="failed"||failedIds.has(source.id))
-  const ready=sources.filter(source=>!attention.some(item=>item.id===source.id))
+  const isFailed=(source:Source)=>source.status!=="needs_input"&&(source.status==="failed"||failedIds.has(source.id))
+  const needsInput=sources.filter(source=>source.status==="needs_input")
+  const failed=sources.filter(isFailed)
+  const ready=sources.filter(source=>source.status==="done"&&!isFailed(source))
+  const processing=sources.filter(source=>!needsInput.includes(source)&&!failed.includes(source)&&!ready.includes(source))
   const remove=async(source:Source,failedOnly=false)=>{const count=source.failed_attempt_count||0;const message=failedOnly?`Remove ${count} failed processing attempts for this video and keep the completed source?`:`Remove "${sourceTitle(source)}" and all duplicate records with its indexed study data?`;if(!window.confirm(message))return;try{await api.removeSource(source.id,failedOnly);await refresh()}catch(e){window.alert(e instanceof Error?e.message:"Could not remove source")}}
-  const card=(source:Source)=>{const job=latestBySource.get(source.id);const failed=source.status==="failed"||job?.status==="failed";return <article className={`source-card${failed?" source-card-failed":""}`} key={source.id}><div className="source-card-icon"><FileText size={18}/></div><div className="source-card-content"><div className="source-card-title">{sourceTitle(source)}</div><div className="source-card-subtitle">{source.description||source.topic_hint||source.domain_hint||source.name}</div><div className="source-card-footer"><Badge>{statusLabel(failed?"failed":job?.status||source.status)}</Badge>{source.course_id?<Badge>In a learning space</Badge>:<Badge>Unassigned</Badge>}{job&&["running","retrying","queued"].includes(job.status)&&<span className="source-progress">{stageLabel(job.stage)} - {job.progress}</span>}</div>{failed&&<div className="source-error">{job?.error_message||"Processing stopped before this source was ready."}</div>}{Boolean(source.failed_attempt_count)&&<div className="duplicate-note">{source.failed_attempt_count} failed attempt{source.failed_attempt_count===1?"":"s"} for this video</div>}</div><select aria-label={`Move ${source.name} to a learning space`} className="source-course-select" value={source.course_id||""} onChange={async event=>{try{await api.moveSource(source.id,event.target.value?Number(event.target.value):null);await refresh()}catch(e){window.alert(e instanceof Error?e.message:"Could not move source")}}}><option value="">All sources (unassigned)</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}</select><div className="source-card-actions">{failed&&job&&<Button variant="outline" disabled={retryingJob===job.id} onClick={()=>retry(job.id)}>{retryingJob===job.id?<><LoaderCircle size={14}/>Resuming...</>:<><RefreshCw size={14}/>Resume</>}</Button>}{Boolean(source.failed_attempt_count)&&<Button variant="outline" onClick={()=>void remove(source,true)}><Trash2 size={14}/>Remove {source.failed_attempt_count} failed</Button>}<Button variant="outline" onClick={()=>void remove(source)}><Trash2 size={14}/>Remove</Button></div></article>}
+  const card=(source:Source)=><SourceCard key={source.id} source={source} job={latestBySource.get(source.id)} failed={isFailed(source)} courses={courses} retryingJob={retryingJob} retry={retry} remove={remove} refresh={refresh}/>
+  const section=(title:string,help:string,items:Source[],attention=false)=>items.length>0&&<section className={attention?"attention-section":"library-section"}><div className="attention-heading"><div><h3>{title}</h3><p>{help}</p></div><Badge>{items.length}</Badge></div><div className="library-grid">{items.map(card)}</div></section>
   return <section className="library-view">
-    <div className="library-intro"><div><p className="eyebrow">Your knowledge base</p><h2>Everything you've added</h2><p>Ready sources stay here. Failed sources are kept separately so you can resume or remove them.</p><p className="plan-help">Use “Move to space” on a source to file it manually. “Organize existing” profiles and auto-assigns unassigned sources; existing assignments are preserved.</p>{maintenanceNotice&&<p className="plan-help" role="status">{maintenanceNotice}</p>}{maintenanceProgress&&<div className="maintenance-progress" aria-live="polite"><div><strong>{maintenanceProgress.status==="done"?"Organization complete":maintenanceProgress.status==="failed"?"Organization needs attention":maintenanceProgress.status==="running"?"Organizing existing sources":"Organization queued"}</strong><span>{maintenanceProgress.progress_current} / {maintenanceProgress.progress_total} items{maintenanceProgress.checkpoint?` · last: ${maintenanceProgress.checkpoint}`:""}</span></div><progress max={Math.max(1,maintenanceProgress.progress_total)} value={maintenanceProgress.progress_current}/>{maintenanceProgress.status==="failed"&&<><ul>{Object.entries(maintenanceProgress.errors||{}).slice(0,3).map(([key,value])=><li key={key}>{key}: {value}</li>)}</ul><Button variant="outline" onClick={()=>void retryOrganization()}>Retry organization</Button></>}</div>}</div><div className="plan-actions"><Button variant="outline" disabled={maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)} onClick={()=>void organizeExisting()}>{maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)?<><LoaderCircle size={14}/>Organizing…</>:"Organize existing"}</Button><Button onClick={addSource}><Plus size={16}/>Add a source</Button></div></div>
+    <div className="library-intro"><div><p className="eyebrow">Your knowledge base</p><h2>Everything you've added</h2><p>Sources are grouped by what they need. Nothing is deleted automatically, so anything that failed can still be recovered.</p><p className="plan-help">Each source shows the study space it is in and why. Use the space menu on a source to move it. “Organize existing” profiles and files unassigned sources; your own choices are kept.</p>{maintenanceNotice&&<p className="plan-help" role="status">{maintenanceNotice}</p>}{maintenanceProgress&&<div className="maintenance-progress" aria-live="polite"><div><strong>{maintenanceProgress.status==="done"?"Organization complete":maintenanceProgress.status==="failed"?"Organization needs attention":maintenanceProgress.status==="running"?"Organizing existing sources":"Organization queued"}</strong><span>{maintenanceProgress.progress_current} / {maintenanceProgress.progress_total} items{maintenanceProgress.checkpoint?` · last: ${maintenanceProgress.checkpoint}`:""}</span></div><progress max={Math.max(1,maintenanceProgress.progress_total)} value={maintenanceProgress.progress_current}/>{maintenanceProgress.status==="failed"&&<><ul>{Object.entries(maintenanceProgress.errors||{}).slice(0,3).map(([key,value])=><li key={key}>{key}: {value}</li>)}</ul><Button variant="outline" onClick={()=>void retryOrganization()}>Retry organization</Button></>}</div>}</div><div className="plan-actions"><Button variant="outline" disabled={maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)} onClick={()=>void organizeExisting()}>{maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)?<><LoaderCircle size={14}/>Organizing…</>:"Organize existing"}</Button><Button onClick={addSource}><Plus size={16}/>Add a source</Button></div></div>
     {!sources.length?<div className="library-empty"><div className="welcome-icon"><FolderOpen size={23}/></div><h3>Your library is ready when you are</h3><p>Add a video, document, or transcript. LearnOS will take care of organizing it.</p><Button onClick={addSource}><Plus size={16}/>Add your first source</Button></div>:<>
-      {ready.length>0&&<><h3 className="library-subheading">Ready and processing</h3><div className="library-grid">{ready.map(card)}</div></>}
-      {attention.length>0&&<section className="attention-section"><div className="attention-heading"><div><h3>Needs attention</h3><p>These sources are kept here until you resume processing or remove them.</p></div><Badge>{attention.length}</Badge></div><div className="library-grid">{attention.map(card)}</div></section>}
+      {section("Needs your input","LearnOS could not read any text from these. Paste the text or a transcript, or remove them.",needsInput,true)}
+      {section("Couldn't be processed","Processing stopped. Resume keeps the work already done.",failed,true)}
+      {section("Processing","Being prepared in the background. You can keep working.",processing)}
+      {section("Ready to study","Used by your study plans, study packs and chat.",ready)}
     </>}
   </section>
+}
+
+function SourceCard({source,job,failed,courses,retryingJob,retry,remove,refresh}:{source:Source;job?:Job;failed:boolean;courses:Course[];retryingJob:number|null;retry:(id:number)=>void;remove:(source:Source,failedOnly?:boolean)=>Promise<void>;refresh:()=>Promise<void>}){
+  const[pasting,setPasting]=useState<string|null>(null)
+  const[notice,setNotice]=useState("")
+  const active=Boolean(job&&["running","retrying","queued"].includes(job.status))
+  const issues=source.issues||[]
+  const unreadable=issues.filter(issue=>issue.status==="needs_input").length
+  const temporary=issues.filter(issue=>issue.status==="failed").length
+  const status=failed?"failed":source.status==="needs_input"?"needs_input":active&&job?job.status:source.status
+  const itemWord=(count:number)=>source.source_type==="youtube"?`video${count===1?"":"s"}`:`item${count===1?"":"s"}`
+  const save=async(target:string,text:string,format:PasteFormat)=>{
+    if(target==="source")await api.pasteSourceText(source.id,text,format)
+    else await api.pasteDocumentTranscript(Number(target.slice(4)),text,format)
+    setPasting(null);setNotice("Saved. LearnOS is indexing it now.");await refresh()
+  }
+  const reprocess=async()=>{try{await api.reprocessSource(source.id);setNotice("Trying again in the background.");await refresh()}catch(e){setNotice(e instanceof Error?e.message:"Could not try again")}}
+  return <article className={`source-card${failed||source.status==="needs_input"?" source-card-failed":""}`}>
+    <div className="source-card-icon"><FileText size={18}/></div>
+    <div className="source-card-content">
+      <div className="source-card-title">{sourceTitle(source)}</div>
+      <div className="source-card-subtitle">{source.description||source.topic_hint||source.domain_hint||source.name}</div>
+      <div className="source-card-footer"><Badge>{statusLabel(status)}</Badge>{active&&job&&<span className="source-progress">{stageLabel(job.stage)} - {job.progress}</span>}</div>
+      <div className="source-placement">{source.course_name?<>In <strong>{source.course_name}</strong></>:"Not in a study space yet"}{source.assignment_reason&&<span> · {source.assignment_reason}</span>}</div>
+      {failed&&<div className="source-error">{job?.error_message||"Processing stopped before this source was ready."}</div>}
+      {source.status==="needs_input"&&source.status_message&&<div className="source-error">{source.status_message}</div>}
+      {source.status==="done"&&issues.length>0&&<div className="source-issue-note">{[unreadable?`${unreadable} ${itemWord(unreadable)} without captions`:"",temporary?`${temporary} not fetched yet (temporary)`:""].filter(Boolean).join(" · ")}{source.document_count?` out of ${source.document_count}`:""}. The rest is ready to study.</div>}
+      {issues.length>0&&<details className="source-issues" open={source.status==="needs_input"||undefined}><summary>{issues.length===1?`Show the ${itemWord(1)} that needs help`:`Show the ${issues.length} ${itemWord(issues.length)} that need help`}</summary><ul>{issues.map(issue=><li key={issue.document_id}><div><strong>{issue.title}</strong>{issue.message&&<span>{issue.message}</span>}</div>{pasting===`doc:${issue.document_id}`?<PasteTextForm label={`Transcript for “${issue.title}”`} onCancel={()=>setPasting(null)} onSave={(text,format)=>save(`doc:${issue.document_id}`,text,format)}/>:<Button variant="outline" disabled={active} onClick={()=>setPasting(`doc:${issue.document_id}`)}>Paste transcript</Button>}</li>)}</ul></details>}
+      {pasting==="source"&&<PasteTextForm label="Text or transcript for this source" onCancel={()=>setPasting(null)} onSave={(text,format)=>save("source",text,format)}/>}
+      {notice&&<p className="plan-help" role="status">{notice}</p>}
+      {Boolean(source.failed_attempt_count)&&<div className="duplicate-note">{source.failed_attempt_count} failed attempt{source.failed_attempt_count===1?"":"s"} for this video</div>}
+    </div>
+    <select aria-label={`Move ${source.name} to a learning space`} className="source-course-select" value={source.course_id||""} onChange={async event=>{try{await api.moveSource(source.id,event.target.value?Number(event.target.value):null);await refresh()}catch(e){window.alert(e instanceof Error?e.message:"Could not move source")}}}><option value="">All sources (unassigned)</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}</select>
+    <div className="source-card-actions">
+      {failed&&job&&<Button variant="outline" disabled={retryingJob===job.id} onClick={()=>retry(job.id)}>{retryingJob===job.id?<><LoaderCircle size={14}/>Resuming...</>:<><RefreshCw size={14}/>Resume</>}</Button>}
+      {source.status==="needs_input"&&source.source_type!=="youtube"&&pasting!=="source"&&<Button variant="outline" onClick={()=>setPasting("source")}>Paste text</Button>}
+      {issues.length>0&&!active&&<Button variant="outline" onClick={()=>void reprocess()}><RefreshCw size={14}/>{source.source_type==="youtube"?"Retry fetching":"Try again"}</Button>}
+      {Boolean(source.failed_attempt_count)&&<Button variant="outline" onClick={()=>void remove(source,true)}><Trash2 size={14}/>Remove {source.failed_attempt_count} failed</Button>}
+      <Button variant="outline" onClick={()=>void remove(source)}><Trash2 size={14}/>Remove</Button>
+    </div>
+  </article>
+}
+
+function PasteTextForm({label,onSave,onCancel}:{label:string;onSave:(text:string,format:PasteFormat)=>Promise<void>;onCancel:()=>void}){
+  const[text,setText]=useState("")
+  const[format,setFormat]=useState<PasteFormat>("plain")
+  const[busy,setBusy]=useState(false)
+  const[error,setError]=useState("")
+  const submit=async(event:FormEvent)=>{event.preventDefault();if(!text.trim())return;setBusy(true);setError("");try{await onSave(text,format)}catch(e){setError(e instanceof Error?e.message:"Could not save the text")}finally{setBusy(false)}}
+  return <form className="paste-form" onSubmit={event=>void submit(event)}>
+    <label className="field-label">{label}<textarea className="text-input paste-input" value={text} onChange={event=>setText(event.target.value)} placeholder="Paste the text here…" autoFocus/></label>
+    <div className="paste-form-actions"><select className="text-input" aria-label="Text format" value={format} onChange={event=>setFormat(event.target.value as PasteFormat)}><option value="plain">Plain text</option><option value="srt">SRT subtitles</option><option value="vtt">VTT subtitles</option></select><Button type="submit" disabled={busy||!text.trim()}>{busy?<><LoaderCircle size={14}/>Saving…</>:"Save and index"}</Button><Button variant="ghost" onClick={onCancel}>Cancel</Button></div>
+    {error&&<p className="dialog-error" role="alert">{error}</p>}
+  </form>
 }
 
 function AddSourceDialog({courseId,courses,close,refresh}:{courseId?:number;courses:Course[];close:()=>void;refresh:()=>Promise<void>}){

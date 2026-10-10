@@ -1,5 +1,7 @@
 export type Course={id:number;name:string;description?:string|null;domain?:string|null;outline?:string|null}
-export type Source={id:number;name:string;source_type:string;course_id?:number|null;assignment_mode?:string;assignment_status?:string;status:string;topic_hint?:string|null;domain_hint?:string|null;description?:string|null;failed_attempt_count?:number}
+export type SourceIssue={document_id:number;title:string;status:"needs_input"|"failed";message?:string|null}
+export type Source={id:number;name:string;source_type:string;course_id?:number|null;course_name?:string|null;assignment_mode?:string;assignment_status?:string;assignment_reason?:string|null;status:string;status_message?:string|null;topic_hint?:string|null;domain_hint?:string|null;description?:string|null;failed_attempt_count?:number;document_count?:number;issues?:SourceIssue[]}
+export type PasteFormat="plain"|"srt"|"vtt"
 export type Job={id:number;source_id:number;source_name?:string|null;source_type?:string|null;source_uri?:string|null;course_id?:number|null;status:string;stage:string;progress:string;checkpoint?:string|null;retry_count:number;created_at?:string|null;started_at?:string|null;updated_at?:string|null;error_message?:string|null}
 export type MaintenanceJob={id:number;task:string;status:"queued"|"running"|"done"|"failed";progress_current:number;progress_total:number;checkpoint?:string|null;errors:Record<string,string>;updated_at?:string|null}
 export type Stats={sources:number;documents:number;chunks:number;embedded:number;grouped:number;concept_indexed:number}
@@ -30,6 +32,9 @@ export const api={
  courses:()=>req<Course[]>("/courses"),
  sources:(courseId?:number)=>req<Source[]>(courseId?"/sources?course_id="+courseId:"/sources"),
  moveSource:(sourceId:number,courseId:number|null)=>req<{id:number;course_id:number|null}>(`/sources/${sourceId}/course`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({course_id:courseId})}),
+ pasteDocumentTranscript:(documentId:number,text:string,format:PasteFormat)=>req<{document_id:number;source_id:number;job_id:number}>(`/documents/${documentId}/transcript`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,input_format:format})}),
+ pasteSourceText:(sourceId:number,text:string,format:PasteFormat)=>req<{source_id:number;job_id:number}>(`/sources/${sourceId}/text`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,input_format:format})}),
+ reprocessSource:(sourceId:number)=>req<{source_id:number;job_id:number;documents_retried:number}>(`/sources/${sourceId}/reprocess`,{method:"POST"}),
  removeSource:(sourceId:number,failedAttemptsOnly=false)=>req<{removed:boolean;source_id:number;removed_count:number}>(`/sources/${sourceId}${failedAttemptsOnly?"?failed_attempts_only=true":""}`,{method:"DELETE"}),
  studyProgress:(courseId?:number)=>req<{completed_topics:string[]}>("/study-progress"+(courseId?"?course_id="+courseId:"")),
  updateStudyProgress:(topic:string,courseId:number|undefined,completed:boolean)=>req<any>("/study-progress",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,course_id:courseId||null,completed})}),

@@ -215,6 +215,26 @@ Return JSON with a ranked array. Each item must contain chunk_id and relevance f
     return candidates[:final_k]
 
 
+def collapse_into_parents(items: list[tuple[Chunk, float]]) -> list[tuple[Chunk, float]]:
+    """Drop leaves whose parent window is also selected; the window already contains their text.
+
+    The window takes the position and the best score of the leaves it absorbs, so the
+    evidence order is kept while the same passage is never sent twice.
+    """
+    parents = {chunk.id: (chunk, score) for chunk, score in items if chunk.chunk_kind == "parent"}
+    best: dict[int, float] = {}
+    order: list[Chunk] = []
+    for chunk, score in items:
+        if chunk.chunk_kind == "leaf" and chunk.parent_chunk_id in parents:
+            chunk = parents[chunk.parent_chunk_id][0]
+        if chunk.id not in best:
+            order.append(chunk)
+            best[chunk.id] = score
+        else:
+            best[chunk.id] = max(best[chunk.id], score)
+    return [(chunk, best[chunk.id]) for chunk in order]
+
+
 def expand_context_window(
     db: Session,
     ranked: list[tuple[Chunk, float]],
@@ -256,7 +276,7 @@ def expand_context_window(
         if len(ranked) + len(additions) >= max_items:
             break
 
-    return (ranked + additions)[:max_items]
+    return collapse_into_parents((ranked + additions)[:max_items])
 
 
 def retrieve_many(

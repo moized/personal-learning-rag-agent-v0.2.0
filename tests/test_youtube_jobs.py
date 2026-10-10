@@ -178,6 +178,12 @@ def test_successful_worker_run_marks_job_done(tmp_path, monkeypatch):
         source = Source(name="local", source_type="file", status="queued")
         db.add(source)
         db.flush()
+        # An already-indexed chunk: a source with no text now finishes as needs_input.
+        document = Document(source_id=source.id, external_id="local", title="local", status="processing")
+        db.add(document)
+        db.flush()
+        db.add(Chunk(document_id=document.id, chunk_index=0, chunk_kind="leaf", text="Indexed text.",
+                     embedding_status="done", classification_status="done"))
         job = Job(source_id=source.id, task="process_source", status="running")
         db.add(job)
         db.commit()

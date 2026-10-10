@@ -5,17 +5,32 @@ import threading
 import time
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from ..config import settings
 from ..db import session_scope
 from ..models import Source, Document, Chunk, Job, Group, Course, MaintenanceJob
 from ..providers.factory import provider
 from ..providers.base import ProviderAuthenticationError, ProviderQuotaExceededError, ProviderRateLimitError
-from .ingestion import parse_file, chunk_text, list_youtube_videos, fetch_youtube_transcript
+from .ingestion import parse_file, chunk_text, list_youtube_entries, fetch_youtube_transcript, TranscriptUnavailable
 from .grouping import choose_group, extract_group_concepts, merge_centroid
 from .knowledge_graph import add_sequence_relations, extract_source_relations
 from .agent import set_plan
 from .reliability import is_retryable_error, profile_needs_refresh
+
+NO_TEXT_MESSAGES = {
+    "youtube": "None of these videos have captions LearnOS can read. Paste a transcript for each video in the Library.",
+    "default": "No readable text was found. If this is a scanned PDF or image-only slides, paste the text or a transcript in the Library.",
+}
+
+
+def concise_space_name(value: str, limit: int = 60) -> str:
+    """Turn a course title, topic or goal into a short study-space name."""
+    name = re.sub(r"\s+", " ", str(value or "")).strip()
+    # Playlist items are often titled "1: Introduction to ..."; the number is not part of the subject.
+    name = re.sub(r"^(?:lecture|lec|part|week|module|unit|session)?\s*\d+\s*[:.)\-\u2013]\s*", "", name, flags=re.IGNORECASE)
+    if len(name) <= limit:
+        return name
+    return name[:limit].rsplit(" ", 1)[0].rstrip(",;:-\u2013 ") or name[:limit]
 
 
 class Worker(threading.Thread):
@@ -161,7 +176,7 @@ class Worker(threading.Thread):
                 job.status = "failed" if job.errors_json and json.loads(job.errors_json) else "done"
 
     def _auto_group_source(self, db, source: Source, ai, *, force: bool = False):
-        """Assign an unfiled source to a matching learning space or create one."""
+        """Assign an unfiled source to a matching learning space or create one, recording why."""
         if (source.assignment_mode != "auto" and not force) or source.course_id is not None:
             return
         try:
@@ -171,6 +186,8 @@ class Worker(threading.Thread):
         courses = db.execute(select(Course).order_by(Course.name)).scalars().all()
         course_id = None
         new_name = ""
+        reason = ""
+        confidence = 0.0
         if courses:
             schema = {
                 "type": "object",
@@ -178,37 +195,42 @@ class Worker(threading.Thread):
                     "course_id": {"type": "integer"},
                     "new_course_name": {"type": "string"},
                     "confidence": {"type": "number"},
+                    "reason": {"type": "string"},
                 },
-                "required": ["course_id", "new_course_name", "confidence"],
+                "required": ["course_id", "new_course_name", "confidence", "reason"],
             }
             prompt = f"""File this learning source into an existing learning space only when its title, description, domain, and outline fit the source's learning goal and outcomes. Otherwise propose a concise new space.
 Use the structured source profile and indexed content as evidence. A shared broad domain alone is not a fit. Be conservative; confidence must be at least 0.65 to choose an existing space.
 Source profile: {json.dumps(profile, ensure_ascii=False)}
 Available spaces: {json.dumps([{"id": course.id, "name": course.name, "description": course.description, "domain": course.domain, "outline": course.outline} for course in courses], ensure_ascii=False)}
-Return an available course_id only when the match is strong and confidence >= 0.65. Otherwise return course_id 0 and a useful new_course_name based on the source's specific learning objective."""
+Return an available course_id only when the match is strong and confidence >= 0.65. Otherwise return course_id 0 and a short new_course_name (2-6 words, a subject name, not a sentence) based on the source's specific learning objective.
+Give a one-sentence reason a learner can read."""
             try:
                 result = ai.generate_json(prompt, task="classification", schema=schema)
                 course_id = int(result.get("course_id") or 0) or None
                 confidence = float(result.get("confidence") or 0.0)
-                new_name = str(result.get("new_course_name") or "").strip()[:500]
+                new_name = concise_space_name(str(result.get("new_course_name") or ""))
+                reason = str(result.get("reason") or "").strip()[:400]
                 if confidence < 0.65 or course_id not in {course.id for course in courses}:
                     course_id = None
             except Exception as exc:
                 if is_retryable_error(exc):
                     raise
                 logging.exception("AI source-to-course classification failed; using profile fallback")
-        if course_id is None:
+        if course_id is not None:
+            matched = next(course for course in courses if course.id == course_id)
+            explanation = f'Filed into "{matched.name}" automatically ({confidence:.0%} match).'
+        else:
             suggested_groups = profile.get("suggested_group_names") or []
             suggested_topics = profile.get("topics") or []
             if not isinstance(suggested_groups, list):
                 suggested_groups = [suggested_groups]
             if not isinstance(suggested_topics, list):
                 suggested_topics = [suggested_topics]
-            suggestions = [value for value in [profile.get("course_title"), profile.get("primary_learning_goal"), *suggested_groups, *suggested_topics] if value]
+            # Subject names first; the learning goal is a sentence and only a last resort.
+            suggestions = [value for value in [profile.get("course_title"), *suggested_groups, *suggested_topics, profile.get("domain"), profile.get("primary_learning_goal")] if value]
             if not new_name and suggestions:
-                new_name = str(suggestions[0]).strip()[:500]
-            if not new_name:
-                new_name = str(profile.get("domain") or "").strip()[:500]
+                new_name = concise_space_name(str(suggestions[0]))
             if not new_name:
                 source.assignment_status = "unassigned"
                 source.assignment_reason = "Not enough source metadata to infer a learning space. Choose one manually in the library."
@@ -219,12 +241,15 @@ Return an available course_id only when the match is strong and confidence >= 0.
                 target = Course(name=new_name, description=str(profile.get("description") or "")[:2000], domain=str(profile.get("domain") or "")[:255] or None)
                 db.add(target)
                 db.flush()
+                explanation = f'Created a new space "{new_name}" because no existing space matched this source.'
+            else:
+                explanation = f'Filed into "{target.name}", the space with the same subject name.'
             course_id = target.id
         source.course_id = course_id
         if force:
             source.assignment_mode = "auto"
         source.assignment_status = "assigned"
-        source.assignment_reason = "Automatically assigned from source metadata and learning profile."
+        source.assignment_reason = f"{explanation} {reason}".strip()[:1000]
 
     def _record_failure(self, job_id: int, exc: Exception) -> int | None:
         with session_scope() as db:
@@ -277,7 +302,7 @@ Return an available course_id only when the match is strong and confidence >= 0.
         if isinstance(exc, ProviderRateLimitError) or "429" in str(exc):
             return f"Gemini temporary rate limit during {job.stage.replace('_', ' ')}. LearnOS will retry automatically ({job.retry_count}/{settings.retry_max}); if it persists, processing stops and Resume remains available."
         if job.stage == "transcript":
-            return "Could not retrieve captions. Check that the video is accessible and has an English or Turkish transcript."
+            return "Could not retrieve captions from YouTube. This is usually temporary; LearnOS retries automatically, and you can choose Resume later."
         if job.stage == "structure" and "playlist" in str(exc).lower():
             return "Could not read this playlist. Check that it is public and try again."
         if job.stage == "structure":
@@ -389,23 +414,41 @@ Return an available course_id only when the match is strong and confidence >= 0.
             self._ensure_chunk_hierarchy(db, doc)
 
     def _ensure_youtube_documents(self, db, src: Source):
-        videos = list_youtube_videos(src.uri)
-        for video_id, title in videos:
+        info, videos = list_youtube_entries(src.uri)
+        if info.get("title") and (not src.name or src.name.startswith(("http://", "https://"))):
+            src.name = info["title"][:500]
+        try:
+            metadata = json.loads(src.metadata_json or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["platform"] = {"site": "youtube", **{key: value for key, value in info.items() if value}, "video_count": len(videos)}
+        src.metadata_json = json.dumps(metadata, ensure_ascii=False)
+        for video in videos:
+            video_metadata = json.dumps({key: value for key, value in video.items() if key != "id" and value}, ensure_ascii=False)
             doc = db.execute(
                 select(Document).where(
                     Document.source_id == src.id,
-                    Document.external_id == video_id,
+                    Document.external_id == video["id"],
                 )
             ).scalar_one_or_none()
             if not doc:
                 doc = Document(
                     source_id=src.id,
-                    external_id=video_id,
-                    title=title,
+                    external_id=video["id"],
+                    title=video["title"],
                     section="youtube transcript",
                     status="pending",
+                    metadata_json=video_metadata,
                 )
                 db.add(doc)
+            else:
+                # Older versions titled single videos by their ID.
+                if doc.title == doc.external_id and video["title"] != video["id"]:
+                    doc.title = video["title"]
+                if not doc.metadata_json:
+                    doc.metadata_json = video_metadata
         return len(videos)
 
     def _ensure_source_profile(self, db, src: Source, ai):
@@ -429,7 +472,13 @@ Return an available course_id only when the match is strong and confidence >= 0.
         except json.JSONDecodeError:
             provided = {}
         first_doc = db.execute(select(Document).where(Document.source_id == src.id).order_by(Document.id).limit(1)).scalar_one_or_none()
-        explicit_title = (first_doc.title if first_doc and first_doc.title else None) or src.name
+        document_count = db.scalar(select(func.count()).select_from(Document).where(Document.source_id == src.id)) or 0
+        # A playlist's own title describes the course; its first video's title does not.
+        name_is_url = (src.name or "").startswith(("http://", "https://"))
+        if first_doc and first_doc.title and (document_count == 1 or name_is_url):
+            explicit_title = first_doc.title
+        else:
+            explicit_title = src.name
         profile_prompt = f"""Profile the educational purpose and identity of this single source. Do not merge it with other sources.
 Do not fill fields from general knowledge. Use an empty string or empty list when the source does not provide enough evidence. Mark fields inferred from content in inferred_fields and assign conservative confidence.
 Source ID: {src.id}
@@ -598,6 +647,10 @@ Chunk:
                 job.progress_total = len(docs)
                 doc_ids = [d.id for d in docs]
                 db.commit()
+            # One video without captions must not block the rest of a playlist. Videos with
+            # no usable captions wait for a pasted transcript; a temporary YouTube block stops
+            # fetching for this run and leaves the remaining videos for a retry.
+            blocked: Exception | None = None
             for i, doc_id in enumerate(doc_ids):
                 with session_scope() as db:
                     job = db.get(Job, job_id)
@@ -608,11 +661,27 @@ Chunk:
                             Chunk.chunk_kind == "leaf",
                         )
                     ).first()
-                    if not existing:
-                        text_value = fetch_youtube_transcript(doc.external_id)
-                        for ci, piece in enumerate(
-                            chunk_text(text_value, settings.chunk_size, settings.chunk_overlap)
-                        ):
+                    if not existing and doc.status != "needs_input":
+                        text_value = ""
+                        if blocked is not None:
+                            doc.status = "failed"
+                            doc.error = "Not fetched because YouTube was refusing requests. Retry later."
+                        else:
+                            try:
+                                text_value = fetch_youtube_transcript(doc.external_id)
+                            except TranscriptUnavailable as exc:
+                                doc.status = "needs_input"
+                                doc.error = exc.user_message
+                            except Exception as exc:
+                                logging.warning("Transcript fetch failed for %s: %s", doc.external_id, exc)
+                                blocked = exc
+                                doc.status = "failed"
+                                doc.error = "YouTube did not return the transcript (temporary). Retry later."
+                        pieces = chunk_text(text_value, settings.chunk_size, settings.chunk_overlap) if text_value else []
+                        if text_value and not pieces:
+                            doc.status = "needs_input"
+                            doc.error = "The captions for this video are empty."
+                        for ci, piece in enumerate(pieces):
                             db.add(
                                 Chunk(
                                     document_id=doc.id,
@@ -622,12 +691,25 @@ Chunk:
                                     token_estimate=max(1, len(piece) // 4),
                                 )
                             )
+                        if pieces:
+                            doc.status = "processing"
+                            doc.error = None
+                    elif existing:
+                        doc.status = "processing"
                     db.flush()
                     self._ensure_chunk_hierarchy(db, doc)
-                    doc.status = "processing"
                     job.progress_current = i + 1
                     job.checkpoint = f"video:{i + 1}/{len(doc_ids)}"
                     db.commit()
+            if blocked is not None:
+                with session_scope() as db:
+                    has_text = db.execute(
+                        select(Chunk.id).join(Document, Chunk.document_id == Document.id)
+                        .where(Document.source_id == src.id, Chunk.chunk_kind == "leaf").limit(1)
+                    ).first()
+                if not has_text:
+                    # Nothing usable yet and the cause is temporary: let the job retry.
+                    raise RuntimeError(f"Transcript fetching was refused by YouTube: {blocked}")
 
         with session_scope() as db:
             job = db.get(Job, job_id)
@@ -647,6 +729,17 @@ Chunk:
                 )
                 .order_by(Chunk.id)
             ).scalars().all()
+            if not chunk_rows:
+                # Finishing as "done" would list an empty source as ready to study.
+                message = NO_TEXT_MESSAGES.get(src.source_type, NO_TEXT_MESSAGES["default"])
+                src.status = "needs_input"
+                src.error = message
+                job.status = "done"
+                job.stage = "done"
+                job.checkpoint = "needs_input"
+                job.error_message = message[:500]
+                db.commit()
+                return
             job.stage = "index"
             job.progress_current = 0
             job.progress_total = len(chunk_rows)
@@ -769,12 +862,15 @@ Chunk:
                 src.assignment_status = "assigned"
             else:
                 src.assignment_status = "unassigned"
-            docs = db.execute(
-                select(Document).where(Document.source_id == src.id)
-            ).scalars().all()
-            for doc in docs:
-                doc.status = "done"
+            indexed_doc_ids = set(db.execute(
+                select(Chunk.document_id).join(Document, Chunk.document_id == Document.id)
+                .where(Document.source_id == src.id, Chunk.chunk_kind == "leaf").distinct()
+            ).scalars().all())
+            for doc in db.execute(select(Document).where(Document.source_id == src.id)).scalars().all():
+                if doc.id in indexed_doc_ids:
+                    doc.status = "done"
             src.status = "done"
+            src.error = None
             job.status = "done"
             job.stage = "done"
             job.progress_current = job.progress_total

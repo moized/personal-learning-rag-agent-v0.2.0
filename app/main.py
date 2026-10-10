@@ -20,7 +20,7 @@ from .routers.learner import router as learner_router
 from .services.reliability import profile_needs_refresh
 from .services.study import answer
 from .services.curriculum import build_syllabus, build_syllabus_structured, build_study_pack_prompt, build_external_study_pack
-from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url
+from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(
@@ -105,6 +105,11 @@ class StructuredSourceRequest(BaseModel):
 
 class ConversationCreateRequest(BaseModel):
     title: str = Field(default="New chat", max_length=500)
+
+
+class TextContentRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=2_000_000)
+    input_format: Literal["plain", "srt", "vtt"] = "plain"
 
 
 class ConversationMessageRequest(BaseModel):
@@ -226,31 +231,53 @@ def sources(course_id: int | None = None):
         # Keep the most useful record visible, preferring completed ingestion.
         unique_sources: dict[tuple[str, str | int], Source] = {}
         failed_attempts: dict[tuple[str, str | int], int] = defaultdict(int)
+        source_keys: dict[int, tuple[str, str | int]] = {}
         for source in source_rows:
             if source.source_type == "youtube":
                 key = ("youtube", canonical_youtube_url(source.uri or source.name))
             else:
                 key = ("source", source.id)
+            source_keys[source.id] = key
             if source.status == "failed":
                 failed_attempts[key] += 1
             current = unique_sources.get(key)
             if current is None or (source.status == "done" and current.status != "done"):
                 unique_sources[key] = source
+        visible = list(unique_sources.values())
+        ids = [source.id for source in visible]
+        course_names = {course.id: course.name for course in db.execute(select(Course)).scalars().all()}
+        document_counts = dict(db.execute(
+            select(Document.source_id, func.count(Document.id)).where(Document.source_id.in_(ids)).group_by(Document.source_id)
+        ).all()) if ids else {}
+        # Parts of a source that could not be read, e.g. playlist videos without captions.
+        issues: dict[int, list[dict]] = defaultdict(list)
+        if ids:
+            for document in db.execute(
+                select(Document).where(Document.source_id.in_(ids), Document.status.in_(["needs_input", "failed"])).order_by(Document.id)
+            ).scalars().all():
+                issues[document.source_id].append({"document_id": document.id, "title": document.title or document.external_id,
+                                                   "status": document.status, "message": document.error})
         return [
             {
                 "id": source.id,
                 "name": source.name,
                 "source_type": source.source_type,
                 "course_id": source.course_id,
+                "course_name": course_names.get(source.course_id),
                 "assignment_mode": source.assignment_mode,
                 "assignment_status": source.assignment_status,
+                "assignment_reason": source.assignment_reason,
                 "status": source.status,
+                # Only the user-facing needs-input message; raw failure details stay server-side.
+                "status_message": source.error if source.status == "needs_input" else None,
                 "topic_hint": source.topic_hint,
                 "domain_hint": source.domain_hint,
                 "description": source.description,
-                "failed_attempt_count": failed_attempts[key],
+                "failed_attempt_count": failed_attempts[source_keys[source.id]],
+                "document_count": document_counts.get(source.id, 0),
+                "issues": issues.get(source.id, []),
             }
-            for source in unique_sources.values()
+            for source in visible
         ]
 
 
@@ -334,6 +361,111 @@ def remove_source(source_id: int, failed_attempts_only: bool = False):
         if path.exists():
             path.unlink()
     return {"removed": True, "source_id": source_id, "removed_count": len(source_ids)}
+
+
+def _has_active_job(db, source_id: int) -> bool:
+    return db.execute(
+        select(Job.id).where(Job.source_id == source_id, Job.status.in_(["queued", "running", "retrying"])).limit(1)
+    ).first() is not None
+
+
+def _pasted_text(req: TextContentRequest) -> str:
+    text = clean_caption_text(req.text) if req.input_format in {"srt", "vtt"} else req.text
+    if not text.strip():
+        raise HTTPException(400, "The pasted text is empty.")
+    return text
+
+
+@app.post("/documents/{document_id}/transcript")
+def add_document_transcript(document_id: int, req: TextContentRequest):
+    """Attach a pasted transcript to one item (e.g. a video without captions) and index it."""
+    pieces = chunk_text(_pasted_text(req), settings.chunk_size, settings.chunk_overlap)
+    with session_scope() as db:
+        document = db.get(Document, document_id)
+        if document is None:
+            raise HTTPException(404, "Item not found")
+        source = db.get(Source, document.source_id)
+        if _has_active_job(db, source.id):
+            raise HTTPException(409, "This source is still processing. Try again when it finishes.")
+        if db.execute(select(Chunk.id).where(Chunk.document_id == document.id, Chunk.chunk_kind == "leaf").limit(1)).first():
+            raise HTTPException(409, "This item already has text.")
+        for index, piece in enumerate(pieces):
+            db.add(Chunk(document_id=document.id, chunk_index=index, chunk_kind="leaf", text=piece, token_estimate=max(1, len(piece) // 4)))
+        try:
+            metadata = json.loads(document.metadata_json or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        metadata["transcript_origin"] = "pasted"
+        document.metadata_json = json.dumps(metadata, ensure_ascii=False)
+        document.status = "processing"
+        document.error = None
+        source.status = "queued"
+        source.error = None
+        job = enqueue(db, source.id)
+        return {"document_id": document.id, "source_id": source.id, "job_id": job.id, "chunks": len(pieces)}
+
+
+@app.post("/sources/{source_id}/text")
+def replace_source_text(source_id: int, req: TextContentRequest):
+    """Give a file source with no readable text (e.g. a scanned PDF) its text, then index it."""
+    from pathlib import Path
+
+    text = _pasted_text(req)
+    with session_scope() as db:
+        source = db.get(Source, source_id)
+        if source is None:
+            raise HTTPException(404, "Source not found")
+        if source.source_type == "youtube":
+            raise HTTPException(409, "For YouTube sources, paste a transcript for each video instead.")
+        if _has_active_job(db, source.id):
+            raise HTTPException(409, "This source is still processing. Try again when it finishes.")
+        has_text = db.execute(
+            select(Chunk.id).join(Document, Chunk.document_id == Document.id)
+            .where(Document.source_id == source.id, Chunk.chunk_kind == "leaf").limit(1)
+        ).first()
+        if has_text:
+            raise HTTPException(409, "This source already has readable text. Remove it and add the new version instead.")
+        new_path, digest = save_text_content(f"{Path(source.name).stem or 'source'}.txt", text)
+        duplicate = db.execute(select(Source).where(Source.content_hash == digest, Source.id != source.id)).scalar_one_or_none()
+        if duplicate:
+            new_path.unlink(missing_ok=True)
+            raise HTTPException(409, f'This text is already in your library as "{duplicate.name}".')
+        old_path = source.local_path
+        db.execute(delete(Document).where(Document.source_id == source.id))
+        source.local_path = str(new_path)
+        source.content_hash = digest
+        source.status = "queued"
+        source.error = None
+        job = enqueue(db, source.id)
+        result = {"source_id": source.id, "job_id": job.id}
+    if old_path and old_path != str(new_path):
+        candidate = Path(old_path).resolve()
+        if candidate.is_relative_to(settings.upload_path.resolve()) and candidate.exists():
+            candidate.unlink()
+    return result
+
+
+@app.post("/sources/{source_id}/reprocess")
+def reprocess_source(source_id: int):
+    """Try the unreadable parts of a source again, keeping everything already processed."""
+    with session_scope() as db:
+        source = db.get(Source, source_id)
+        if source is None:
+            raise HTTPException(404, "Source not found")
+        if _has_active_job(db, source.id):
+            raise HTTPException(409, "This source is already processing.")
+        retried = 0
+        for document in db.execute(
+            select(Document).where(Document.source_id == source.id, Document.status.in_(["needs_input", "failed"]))
+        ).scalars().all():
+            document.status = "pending"
+            document.error = None
+            retried += 1
+        source.status = "queued"
+        source.error = None
+        job = enqueue(db, source.id)
+        return {"source_id": source.id, "job_id": job.id, "documents_retried": retried}
 
 
 def _metadata_fields(metadata: dict | None, domain_hint: str | None, topic_hint: str | None, description: str | None):
