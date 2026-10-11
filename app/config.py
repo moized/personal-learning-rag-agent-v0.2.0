@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     concept_extraction: bool = True
     concept_relationships: bool = True
     relationship_min_confidence: float = 0.72
+    # Concept extraction reads every leaf chunk, this many at a time (bounded by characters).
+    concept_batch_chunks: int = 25
+    concept_batch_chars: int = 40000
+    relationship_batch_size: int = 40
+    # Text without its own structure is split into parts of about this many chunks.
+    section_part_chunks: int = 12
+    pdf_pages_per_part: int = 10
+    # A "running" maintenance job with no heartbeat for this long is treated as interrupted.
+    maintenance_stale_seconds: int = 600
 
     dense_candidate_k: int = 24
     lexical_candidate_k: int = 24

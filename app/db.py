@@ -60,7 +60,12 @@ def _migrate_sqlite() -> None:
         "contextual_text": "contextual_text TEXT",
         "token_estimate": "token_estimate INTEGER DEFAULT 0",
         "group_confidence": "group_confidence FLOAT",
+        "section_id": "section_id INTEGER",
+        "concept_pass": "concept_pass INTEGER DEFAULT 0",
     })
+    with engine.begin() as conn:
+        # create_all only indexes new tables; columns added above need their index explicitly.
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chunks_section_id ON chunks (section_id)"))
     _add_missing_columns("study_plans", {"relationships_json": "relationships_json TEXT"})
     _add_missing_columns("study_plan_nodes", {"path_id": "path_id VARCHAR(100) DEFAULT 'main'"})
     with engine.begin() as conn:

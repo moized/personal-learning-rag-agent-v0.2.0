@@ -45,6 +45,32 @@ def parse_structured_literal(raw: str) -> dict:
     return obj
 
 
+def _isolate_headings(text: str) -> str:
+    """Put Markdown headings (outside code fences) on their own block, so joining a block's
+    lines never merges a heading with the paragraph under it."""
+    lines, in_fence = [], False
+    for line in text.split("\n"):
+        if not in_fence and re.match(r"^\s{0,3}#{1,6}\s+\S", line):
+            lines.extend(["", line, ""])
+        else:
+            lines.append(line)
+        if re.match(r"^\s{0,3}(```|~~~)", line):  # a fence is a line of its own (CommonMark)
+            in_fence = not in_fence
+    return "\n".join(lines)
+
+
+def count_markdown_headings(text: str) -> int:
+    """Markdown heading lines outside code fences."""
+    count, in_fence = 0, False
+    for line in text.replace("\r\n", "\n").split("\n"):
+        # In plain text a heading starts with a capital or a number; "# create some data" is a code comment.
+        if not in_fence and re.match(r"^\s{0,3}#{1,6}\s+[A-Z0-9]", line):
+            count += 1
+        if re.match(r"^\s{0,3}(```|~~~)", line):  # a fence is a line of its own (CommonMark)
+            in_fence = not in_fence
+    return count
+
+
 def _split_paragraphs(text: str) -> list[str]:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     blocks = [re.sub(r"\s+", " ", b).strip() for b in re.split(r"\n\s*\n", text) if b.strip()]
@@ -123,7 +149,12 @@ def parse_file(path: Path) -> list[RawDocument]:
                 docs.append(RawDocument(f"{path.name}:p{i}", path.stem, f"page {i}", text))
         return docs
     if suffix in {".txt", ".md"}:
-        return [RawDocument(path.name, path.stem, None, path.read_text(encoding="utf-8", errors="ignore"))]
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        # Markdown keeps its headings on their own lines. Plain text only counts as Markdown with
+        # at least two headings, so a stray "# of samples" or code comment is left alone.
+        if suffix == ".md" or count_markdown_headings(text) >= 2:
+            text = _isolate_headings(text)
+        return [RawDocument(path.name, path.stem, None, text)]
     if suffix in {".srt", ".vtt"}:
         clean = clean_caption_text(path.read_text(encoding="utf-8", errors="ignore"))
         return [RawDocument(path.name, path.stem, "manual transcript", clean)]
@@ -137,8 +168,14 @@ def parse_file(path: Path) -> list[RawDocument]:
     if suffix == ".docx":
         from docx import Document
         doc = Document(str(path))
-        text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
-        return [RawDocument(path.name, path.stem, None, text)]
+        paragraphs = []
+        for paragraph in doc.paragraphs:
+            if not paragraph.text.strip():
+                continue
+            # Keep Word headings as Markdown headings so the document's sections survive.
+            level = re.match(r"Heading\s*(\d)", getattr(paragraph.style, "name", "") or "")
+            paragraphs.append(f"{'#' * min(int(level.group(1)), 3)} {paragraph.text.strip()}" if level else paragraph.text)
+        return [RawDocument(path.name, path.stem, None, "\n\n".join(paragraphs))]
     if suffix == ".pptx":
         from pptx import Presentation
         presentation = Presentation(str(path))

@@ -63,3 +63,4 @@
 .paste-form{display:grid;gap:8px;margin-top:9px}.paste-form .paste-input{min-height:120px}.paste-form-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.paste-form-actions .text-input{width:auto;min-height:34px;padding:5px 8px;font-size:11px}.paste-form-actions .btn{min-height:34px;padding:6px 10px;font-size:11px}
 .status-dot.needs_input{background:#c26b47}
 .source-card{flex-wrap:wrap}.source-card-content{flex:1 1 260px}.source-card-actions{flex-wrap:wrap}
+.source-coverage{margin-top:5px;color:#5f735f;font-size:11px}.source-coverage.pending{color:#9a6a24}

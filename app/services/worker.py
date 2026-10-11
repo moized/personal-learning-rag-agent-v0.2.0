@@ -12,7 +12,9 @@ from ..models import Source, Document, Chunk, Job, Group, Course, MaintenanceJob
 from ..providers.factory import provider
 from ..providers.base import ProviderAuthenticationError, ProviderQuotaExceededError, ProviderRateLimitError
 from .ingestion import parse_file, chunk_text, list_youtube_entries, fetch_youtube_transcript, TranscriptUnavailable
-from .grouping import choose_group, extract_group_concepts, merge_centroid
+from .grouping import choose_group, merge_centroid
+from .concepts import concepts_available, extract_batch_concepts, pending_concept_batches
+from .sections import build_source_sections
 from .knowledge_graph import add_sequence_relations, extract_source_relations
 from .agent import set_plan
 from .reliability import is_retryable_error, profile_needs_refresh
@@ -39,6 +41,8 @@ class Worker(threading.Thread):
     def __init__(self):
         super().__init__(name="learning-agent-worker")
         self.stop_event = threading.Event()
+        # The maintenance job this worker is processing right now; it is live whatever its heartbeat says.
+        self.current_maintenance_id: int | None = None
 
     def stop(self):
         self.stop_event.set()
@@ -58,25 +62,29 @@ class Worker(threading.Thread):
                 if self._is_rate_limit_error(job.error or ""):
                     job.retry_count = 0
                 job.status = "queued"
-            for job in db.execute(select(MaintenanceJob).where(MaintenanceJob.status == "running", MaintenanceJob.updated_at < stale_before)).scalars().all():
-                job.status = "queued"
+        self._requeue_stale_maintenance()
         while not self.stop_event.is_set():
-            maintenance_id = self._claim_maintenance_job()
-            if maintenance_id is not None:
-                try:
-                    self._process_maintenance_job(maintenance_id)
-                except Exception as exc:
-                    logging.exception("Maintenance job %s failed", maintenance_id)
-                    with session_scope() as db:
-                        maintenance = db.get(MaintenanceJob, maintenance_id)
-                        if maintenance:
-                            maintenance.status = "failed"
-                            maintenance.errors_json = json.dumps({"job": str(exc)[:1000]}, ensure_ascii=False)
-                continue
+            # Sources the user added come first; background maintenance runs when no job waits.
             with session_scope() as db:
                 from .queue import claim_next
                 job = claim_next(db)
             if not job:
+                maintenance_id = self._claim_maintenance_job()
+                if maintenance_id is not None:
+                    self.current_maintenance_id = maintenance_id
+                    try:
+                        self._process_maintenance_job(maintenance_id)
+                    except Exception as exc:
+                        logging.exception("Maintenance job %s failed", maintenance_id)
+                        with session_scope() as db:
+                            maintenance = db.get(MaintenanceJob, maintenance_id)
+                            if maintenance:
+                                maintenance.status = "failed"
+                                maintenance.errors_json = json.dumps({"job": str(exc)[:1000]}, ensure_ascii=False)
+                    finally:
+                        self.current_maintenance_id = None
+                    continue
+                self._requeue_stale_maintenance()
                 time.sleep(settings.poll_seconds)
                 continue
             try:
@@ -118,7 +126,8 @@ class Worker(threading.Thread):
             item_ids = json.loads(job.items_json or "[]")
             offset = job.progress_current
         for index in range(offset, len(item_ids)):
-            if self.stop_event.is_set():
+            if self.stop_event.is_set() or self._job_waiting():
+                # Shutdown, or a source the user added is waiting: resume from this item later.
                 with session_scope() as db:
                     job = db.get(MaintenanceJob, job_id)
                     if job:
@@ -131,6 +140,19 @@ class Worker(threading.Thread):
                 item_kind, item_id = "chunk", int(item)
             item_key = f"{item_kind}:{item_id}"
             try:
+                if item_kind == "concepts":
+                    # Opens its own sessions, one per batch, so a long backfill commits as it goes.
+                    finished = self._extract_concepts(item_id, ai, yield_to_jobs=True, heartbeat_job_id=job_id)
+                    if not finished:
+                        # Stopping, or a source the user added is waiting: resume this item later.
+                        with session_scope() as db:
+                            job = db.get(MaintenanceJob, job_id)
+                            if job:
+                                job.status = "queued"
+                        return
+                    with session_scope() as db:
+                        if db.get(Source, item_id) is not None:
+                            extract_source_relations(db, ai, item_id, before_window=lambda: self._touch_maintenance(job_id))
                 with session_scope() as db:
                     if item_kind == "chunk":
                         chunk = db.get(Chunk, item_id)
@@ -160,11 +182,15 @@ class Worker(threading.Thread):
                     job.progress_current = index + 1
                     job.checkpoint = item_key
             except Exception as exc:
-                logging.exception("Maintenance job %s failed for %s", job_id, item_key)
+                with session_scope() as db:
+                    removed = item_kind in {"concepts", "source"} and db.get(Source, item_id) is None
+                if not removed:
+                    logging.exception("Maintenance job %s failed for %s", job_id, item_key)
                 with session_scope() as db:
                     job = db.get(MaintenanceJob, job_id)
                     errors = json.loads(job.errors_json or "{}")
-                    errors[item_key] = str(exc)[:1000]
+                    if not removed:  # a source removed mid-run is simply skipped
+                        errors[item_key] = str(exc)[:1000]
                     job.errors_json = json.dumps(errors, ensure_ascii=False)
                     job.progress_current = index + 1
                     job.checkpoint = item_key
@@ -228,7 +254,12 @@ Give a one-sentence reason a learner can read."""
             if not isinstance(suggested_topics, list):
                 suggested_topics = [suggested_topics]
             # Subject names first; the learning goal is a sentence and only a last resort.
-            suggestions = [value for value in [profile.get("course_title"), *suggested_groups, *suggested_topics, profile.get("domain"), profile.get("primary_learning_goal")] if value]
+            # A "course title" that only repeats the file name ("optimisation-notes") says nothing about the subject.
+            def plain(value) -> str:
+                return re.sub(r"[\s_\-]+", " ", Path(str(value)).stem if "." in str(value)[-6:] else str(value)).strip().casefold()
+            file_names = {plain(source.name), plain(Path(source.local_path).name) if source.local_path else ""}
+            suggestions = [value for value in [profile.get("course_title"), *suggested_groups, *suggested_topics, profile.get("domain"), profile.get("primary_learning_goal")]
+                           if value and plain(value) not in file_names]
             if not new_name and suggestions:
                 new_name = concise_space_name(str(suggestions[0]))
             if not new_name:
@@ -396,6 +427,11 @@ Give a one-sentence reason a learner can read."""
             existing_chunks = db.execute(
                 select(Chunk).where(Chunk.document_id == doc.id, Chunk.chunk_kind == "leaf")
             ).scalars().all()
+            if existing_chunks:
+                # A document's leaves are written in one transaction, so they are complete.
+                # Re-chunking with newer rules would mix old and new pieces of the same text.
+                self._ensure_chunk_hierarchy(db, doc)
+                continue
             existing_indexes = {c.chunk_index for c in existing_chunks}
             pieces = chunk_text(raw.text, settings.chunk_size, settings.chunk_overlap)
             for ci, text_piece in enumerate(pieces):
@@ -614,6 +650,66 @@ Chunk:
                 pass
         chunk.contextual_text = static_context + "\n" + chunk.text
 
+    @staticmethod
+    def _requeue_stale_maintenance() -> int:
+        """Requeue maintenance jobs left "running" by a process that stopped mid-item.
+
+        Running jobs refresh `updated_at` at every item and concept batch, so one that has been
+        silent for `maintenance_stale_seconds` is no longer being worked on by anyone.
+        """
+        stale_before = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=settings.maintenance_stale_seconds)
+        with session_scope() as db:
+            stale = db.execute(select(MaintenanceJob).where(MaintenanceJob.status == "running", MaintenanceJob.updated_at < stale_before)).scalars().all()
+            for job in stale:
+                job.status = "queued"
+            return len(stale)
+
+    @staticmethod
+    def _touch_maintenance(job_id: int) -> None:
+        """Heartbeat in its own short transaction, so others see it at once and no lock is held."""
+        with session_scope() as db:
+            job = db.get(MaintenanceJob, job_id)
+            if job is not None:
+                job.updated_at = datetime.now(UTC).replace(tzinfo=None)
+
+    def _job_waiting(self) -> bool:
+        with session_scope() as db:
+            return db.execute(select(Job.id).where(Job.status == "queued").limit(1)).first() is not None
+
+    def _extract_concepts(self, source_id: int, ai, job_id: int | None = None, *, yield_to_jobs: bool = False,
+                          heartbeat_job_id: int | None = None) -> bool:
+        """Read every unread chunk of a source in batches, then rebuild its sections.
+
+        Returns False when it stopped early (shutdown, or with `yield_to_jobs` a waiting job);
+        unread chunks keep their mark, so the next run continues where this one stopped.
+        """
+        with session_scope() as db:
+            batches = pending_concept_batches(db, source_id) if concepts_available(ai) else []
+            if job_id is not None:
+                job = db.get(Job, job_id)
+                job.stage = "concepts"
+                job.progress_current = 0
+                job.progress_total = len(batches)
+        for number, chunk_ids in enumerate(batches, 1):
+            if yield_to_jobs and (self.stop_event.is_set() or self._job_waiting()):
+                return False
+            if heartbeat_job_id is not None:
+                self._touch_maintenance(heartbeat_job_id)
+            with session_scope() as db:
+                source = db.get(Source, source_id)
+                if source is None:
+                    return True
+                extract_batch_concepts(db, ai, source, chunk_ids)
+                if job_id is not None:
+                    job = db.get(Job, job_id)
+                    job.progress_current = number
+                    job.checkpoint = f"concepts:{number}/{len(batches)}"
+        with session_scope() as db:
+            source = db.get(Source, source_id)
+            if source is not None:
+                build_source_sections(db, source)
+        return True
+
     def process_job(self, job_id: int):
         ai = provider()
         with session_scope() as db:
@@ -808,43 +904,7 @@ Chunk:
                 job.stage = "index"
                 db.commit()
 
-        with session_scope() as db:
-            job = db.get(Job, job_id)
-            src = db.get(Source, job.source_id)
-            group_ids = [
-                row[0]
-                for row in db.execute(
-                    select(Chunk.group_id)
-                    .join(Document, Chunk.document_id == Document.id)
-                    .where(
-                        Document.source_id == src.id,
-                        Chunk.chunk_kind == "leaf",
-                        Chunk.group_id.is_not(None),
-                    )
-                    .distinct()
-                ).all()
-            ]
-            job.stage = "concepts"
-            job.progress_current = 0
-            job.progress_total = len(group_ids)
-            db.commit()
-
-        for i, group_id in enumerate(group_ids, 1):
-            with session_scope() as db:
-                graph_job = db.get(Job, job_id)
-                if graph_job:
-                    graph_job.stage = "graph"
-                job = db.get(Job, job_id)
-                group = db.get(Group, group_id)
-                if group:
-                    extract_group_concepts(db, ai, group)
-                    db.query(Chunk).filter(
-                        Chunk.group_id == group.id,
-                        Chunk.chunk_kind == "leaf",
-                    ).update({"cluster_status": "done"}, synchronize_session=False)
-                job.progress_current = i
-                job.checkpoint = f"group:{i}/{len(group_ids)}"
-                db.commit()
+        self._extract_concepts(src.id, ai, job_id)
 
         with session_scope() as db:
             graph_job = db.get(Job, job_id)

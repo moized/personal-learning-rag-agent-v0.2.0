@@ -94,11 +94,28 @@ class Chunk(Base):
     cluster_status: Mapped[str] = mapped_column(String(30), default="pending")
     group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id"), nullable=True, index=True)
     group_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The section (video, chapter, slides, heading) this leaf belongs to, rebuilt from the source's structure.
+    section_id: Mapped[int | None] = mapped_column(ForeignKey("sections.id"), nullable=True, index=True)
+    # Version of the concept extraction that has read this chunk's full text; 0 = not read yet.
+    concept_pass: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     __table_args__ = (
         UniqueConstraint("document_id", "chunk_index", name="uq_document_chunk"),
         Index("ix_chunk_document_kind_index", "document_id", "chunk_kind", "chunk_index"),
     )
+
+
+class Section(Base):
+    """A titled part of a source taken from its own structure: a video, a PDF chapter, slides, a heading."""
+    __tablename__ = "sections"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), index=True)
+    document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"), nullable=True, index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    title: Mapped[str] = mapped_column(String(500))
+    kind: Mapped[str] = mapped_column(String(20))
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class ChunkRelation(Base):

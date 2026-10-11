@@ -4,6 +4,8 @@ from sklearn.feature_extraction.text import HashingVectorizer
 
 class LocalProvider:
     """Offline deterministic fallback. It keeps the pipeline testable without an API key."""
+    # It cannot read text for concepts; sources stay unread until a real model is configured.
+    supports_concept_extraction = False
     def __init__(self, dim: int = 768):
         self.vectorizer = HashingVectorizer(
             n_features=dim, alternate_sign=False, norm="l2", ngram_range=(1, 2), stop_words="english"

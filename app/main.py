@@ -2,7 +2,7 @@ import json
 import hashlib
 import threading
 from collections import defaultdict
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from typing import Literal
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +11,8 @@ from sqlalchemy import select, or_, func, delete
 from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import init_db, session_scope
-from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace, ChunkRelation, StudyProgress, StudyPlan, StudyPlanNode, Conversation, ConversationMessage, MaintenanceJob, SourceRelationship
+from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace, ChunkRelation, StudyProgress, StudyPlan, StudyPlanNode, Conversation, ConversationMessage, MaintenanceJob, SourceRelationship, Section
+from .services.concepts import CONCEPT_PASS
 from .services.files import save_upload, save_text_content
 from .services.queue import enqueue
 from .services.worker import Worker
@@ -249,6 +250,25 @@ def sources(course_id: int | None = None):
         document_counts = dict(db.execute(
             select(Document.source_id, func.count(Document.id)).where(Document.source_id.in_(ids)).group_by(Document.source_id)
         ).all()) if ids else {}
+        section_counts = dict(db.execute(
+            select(Section.source_id, func.count(Section.id)).where(Section.source_id.in_(ids)).group_by(Section.source_id)
+        ).all()) if ids else {}
+        # What "Organize existing" would still do: leaves without a section, and leaves not yet read
+        # in full for concepts (only when concept extraction is enabled).
+        def leaf_counts(condition):
+            return dict(db.execute(
+                select(Document.source_id, func.count(Chunk.id)).join(Chunk, Chunk.document_id == Document.id)
+                .where(Document.source_id.in_(ids), Chunk.chunk_kind == "leaf", condition)
+                .group_by(Document.source_id)
+            ).all()) if ids else {}
+        pending_counts = leaf_counts(_index_pending())
+        sections_pending = leaf_counts(Chunk.section_id.is_(None))
+        concepts_pending = leaf_counts(Chunk.concept_pass < CONCEPT_PASS) if settings.concept_extraction else {}
+        concept_counts = dict(db.execute(
+            select(Document.source_id, func.count(func.distinct(Evidence.concept_id)))
+            .select_from(Evidence).join(Chunk, Evidence.chunk_id == Chunk.id).join(Document, Chunk.document_id == Document.id)
+            .where(Document.source_id.in_(ids)).group_by(Document.source_id)
+        ).all()) if ids else {}
         # Parts of a source that could not be read, e.g. playlist videos without captions.
         issues: dict[int, list[dict]] = defaultdict(list)
         if ids:
@@ -275,6 +295,11 @@ def sources(course_id: int | None = None):
                 "description": source.description,
                 "failed_attempt_count": failed_attempts[source_keys[source.id]],
                 "document_count": document_counts.get(source.id, 0),
+                "section_count": section_counts.get(source.id, 0),
+                "concept_count": concept_counts.get(source.id, 0),
+                "index_pending": pending_counts.get(source.id, 0),
+                "sections_pending": sections_pending.get(source.id, 0),
+                "concepts_pending": concepts_pending.get(source.id, 0),
                 "issues": issues.get(source.id, []),
             }
             for source in visible
@@ -322,10 +347,21 @@ def remove_source(source_id: int, failed_attempts_only: bool = False):
         ).first()
         if active_job:
             raise HTTPException(status_code=409, detail="This source is still processing. Wait until it finishes before removing it.")
+        # "Organize existing" reads sources without a Job; removing one mid-read would leave links
+        # to deleted concepts, so wait for its remaining items to pass this source.
+        heartbeat_cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=settings.maintenance_stale_seconds)
+        for maintenance in db.execute(select(MaintenanceJob).where(MaintenanceJob.status.in_(["queued", "running"]))).scalars().all():
+            live = worker is not None and worker.current_maintenance_id == maintenance.id
+            if maintenance.status == "running" and not live and maintenance.updated_at and maintenance.updated_at < heartbeat_cutoff:
+                continue  # left over from an interrupted run; the worker will requeue it
+            pending = json.loads(maintenance.items_json or "[]")[maintenance.progress_current:]
+            if any(isinstance(item, dict) and item.get("kind") in {"concepts", "source"} and int(item.get("id", -1)) in source_ids for item in pending):
+                raise HTTPException(status_code=409, detail="LearnOS is still organizing this source in the background. Try again when Organize existing finishes.")
 
         document_ids = [row[0] for row in db.execute(select(Document.id).where(Document.source_id.in_(source_ids))).all()]
         chunk_rows = db.execute(select(Chunk.id, Chunk.parent_chunk_id).where(Chunk.document_id.in_(document_ids))).all() if document_ids else []
         chunk_ids = {row.id for row in chunk_rows}
+        db.execute(delete(Section).where(Section.source_id.in_(source_ids)))
         if chunk_ids:
             db.execute(delete(ChunkRelation).where(or_(ChunkRelation.from_chunk_id.in_(chunk_ids), ChunkRelation.to_chunk_id.in_(chunk_ids))))
             db.execute(delete(Evidence).where(Evidence.chunk_id.in_(chunk_ids)))
@@ -361,6 +397,14 @@ def remove_source(source_id: int, failed_attempts_only: bool = False):
         if path.exists():
             path.unlink()
     return {"removed": True, "source_id": source_id, "removed_count": len(source_ids)}
+
+
+def _index_pending():
+    """Leaves that still need reading for concepts (when enabled) or a section."""
+    condition = Chunk.section_id.is_(None)
+    if settings.concept_extraction:
+        condition = condition | (Chunk.concept_pass < CONCEPT_PASS)
+    return condition
 
 
 def _has_active_job(db, source_id: int) -> bool:
@@ -557,7 +601,8 @@ def add_manual_source(
         metadata = {k: v for k, v in obj.items() if k not in {"transcript", "text", "content"}}
     elif input_format in {"srt", "vtt"}:
         transcript = clean_caption_text(payload)
-    path, digest = save_text_content(f"{name}.txt", transcript)
+    extension = input_format if input_format in {"srt", "vtt"} else "txt"
+    path, digest = save_text_content(f"{name}.{extension}", transcript)
     domain_hint, topic_hint, description = _metadata_fields(metadata, domain_hint, topic_hint, description)
     with session_scope() as db:
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
@@ -740,7 +785,14 @@ def enqueue_existing_organization(include_unassigned: bool = True):
                     # are eligible for metadata based placement. Existing assignments stay fixed.
                     source_item["auto_assign_unassigned"] = source.assignment_mode != "auto"
                 source_items.append(source_item)
-        items = [{"kind": "chunk", "id": chunk_id} for chunk_id in chunk_ids] + source_items
+        # Sources whose chunks were never read in full for concepts, or that have no sections yet.
+        unread = set(db.execute(
+            select(Document.source_id).join(Chunk, Chunk.document_id == Document.id).join(Source, Document.source_id == Source.id)
+            .where(Source.status == "done", Chunk.chunk_kind == "leaf", _index_pending())
+            .distinct()
+        ).scalars().all())
+        concept_items = [{"kind": "concepts", "id": source_id} for source_id in sorted(unread)]
+        items = [{"kind": "chunk", "id": chunk_id} for chunk_id in chunk_ids] + source_items + concept_items
         row = MaintenanceJob(task="organize_existing", status="queued" if items else "done", progress_total=len(items), items_json=json.dumps(items))
         db.add(row)
         db.flush()
@@ -762,6 +814,17 @@ def retry_maintenance_job(job_id: int):
             raise HTTPException(404, "Maintenance job not found")
         if row.status != "failed":
             raise HTTPException(409, "Only failed maintenance jobs can be retried")
+        # Retry only the items that failed; finished items would repeat AI calls for nothing.
+        try:
+            errors = json.loads(row.errors_json or "{}")
+            items = json.loads(row.items_json or "[]")
+        except json.JSONDecodeError:
+            errors, items = {}, []
+        if isinstance(errors, dict) and errors and "job" not in errors:
+            failed = [item for item in items if (f"{item.get('kind')}:{item.get('id')}" if isinstance(item, dict) else f"chunk:{item}") in errors]
+            if failed:
+                row.items_json = json.dumps(failed)
+                row.progress_total = len(failed)
         row.status = "queued"
         row.progress_current = 0
         row.checkpoint = None

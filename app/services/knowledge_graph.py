@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import deque
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import Chunk, ChunkRelation, Concept, ConceptRelation, Evidence, Document, Source
@@ -376,6 +377,8 @@ Return JSON with a relationships array. Each relationship must use:
                 }, ensure_ascii=False),
             )
         )
+        # Flush so a repeated pair later in this reply merges and the cycle check sees this edge.
+        db.flush()
         created += 1
     return created
 
@@ -388,13 +391,40 @@ def extract_group_relations(db: Session, ai: AIProvider, group_id: int) -> int:
     return extract_concept_relations(db, ai, concept_ids, f"semantic group {group_id}")
 
 
-def extract_source_relations(db: Session, ai: AIProvider, source_id: int) -> int:
-    """Extract relations across all groups represented by one ingested source."""
-    concept_ids = set(db.execute(
+def extract_source_relations(db: Session, ai: AIProvider, source_id: int, before_window=None) -> int:
+    """Extract relations among one source's concepts, in batches of concepts that first appear close together.
+
+    One call sees at most 40 concepts, so a large source is processed in reading order
+    rather than truncated to the first 40 names alphabetically.
+    """
+    first_seen = func.min(Document.id * 1_000_000 + Chunk.chunk_index)
+    ordered = db.execute(
         select(Evidence.concept_id)
         .join(Chunk, Evidence.chunk_id == Chunk.id)
         .join(Document, Chunk.document_id == Document.id)
         .where(Document.source_id == source_id, Chunk.chunk_kind == "leaf")
-        .distinct()
-    ).scalars().all())
-    return extract_concept_relations(db, ai, concept_ids, f"source {source_id}")
+        .group_by(Evidence.concept_id)
+        .order_by(first_seen, Evidence.concept_id)
+    ).scalars().all()
+    size = max(2, min(40, settings.relationship_batch_size))
+    overlap = size // 4
+    if len(ordered) <= size:
+        windows = [ordered]
+    else:
+        # Even, overlapping windows: no batch is left with a single concept, and concepts
+        # near a window boundary are also compared with their neighbours in the next window.
+        count = math.ceil((len(ordered) - overlap) / (size - overlap))
+        step = math.ceil((len(ordered) - overlap) / count)
+        windows = [ordered[i * step:i * step + step + overlap] for i in range(count)]
+    created = 0
+    if len(windows) > 1 and len(windows[-1]) < 2:
+        windows[-1] = ordered[-size:]  # tiny batch sizes: never leave the last concept alone
+    for window in windows:
+        if len(window) >= 2:
+            if before_window is not None:
+                before_window()  # e.g. a background job's heartbeat before each AI call
+            created += extract_concept_relations(db, ai, set(window), f"source {source_id}")
+            # Commit per window: no write lock is held during the next AI call, and windows
+            # that finished survive a failure in a later one.
+            db.commit()
+    return created
