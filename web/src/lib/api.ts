@@ -9,6 +9,9 @@ export type Stats={sources:number;documents:number;chunks:number;embedded:number
 export type ChatTurn={role:"user"|"assistant";content:string}
 export type ConversationSummary={id:string;title:string;created_at:string;updated_at:string}
 export type StudyPackExport={topic:string;study_text:string;sources:{chunk_id:number;source:string;title?:string|null;section?:string|null}[];copy_paste_ready:boolean;estimated_tokens:number;max_input_tokens:number;omitted_passages:number;suggested_subtopics:string[]}
+export type SessionSize="compact"|"standard"|"large"|"xl"
+export type PreparedPart={id:string;title:string;purpose:string;status:"pending"|"unit"|"thin"|"split";estimated_tokens:number}
+export type PreparedTopic={node_id:string;title:string;purpose:string;status:"unit"|"thin"|"split";depth:number;budget_tokens:number;trail:string[];next_title:string|null;cached:boolean;children:PreparedPart[]|null;study_text?:string;sources?:{chunk_id:number;source:string;title?:string|null;section?:string|null;course?:string|null;is_related:boolean}[];estimated_tokens?:number;source_tokens:number;omitted_passages?:number;related_passages?:number;truncated?:boolean;note?:string|null;reason?:string;warning?:string;provisional?:boolean}
 export type MasteryStatus="unseen"|"learning"|"due"|"mastered"
 export type ConceptMastery={concept_id:number;concept:string;mastery:number;confidence:number;attempts:number;status:MasteryStatus;next_due_at:string|null}
 export type DueReview={concept_id:number;concept:string;mastery:number;due_at:string;overdue_days:number}
@@ -19,7 +22,7 @@ export type QuizResult={quiz_item_id:number;score:number;correct:boolean;feedbac
 const BASE=import.meta.env.VITE_API_URL||"http://localhost:8000"
 async function req<T>(path:string,init?:RequestInit):Promise<T>{
  const r=await fetch(BASE+path,{...init,cache:"no-store"})
- if(!r.ok){let m=r.statusText;try{const d=await r.json();m=d.detail||m}catch{}throw new Error(m)}
+ if(!r.ok){let m=r.statusText;try{const d=await r.json();m=d.detail||m}catch{}throw Object.assign(new Error(m),{status:r.status})}
  return r.json()
 }
 export const api={
@@ -71,6 +74,8 @@ export const api={
  },
  syllabus:(id?:number,regenerate=false)=>req<{syllabus:string;revision:string;source_relationships:{sources:any[];cross_paths:any[];shared_foundations:string[]};nodes:{id:string;parent_id:string|null;path_id:string;type:"outline"|"study";title:string;metadata:Record<string,any>}[];warnings?:string[];status?:PlanStatus;error?:string|null;up_to_date?:boolean;generated_at?:string|null}>("/syllabus"+(id||regenerate?"?"+new URLSearchParams({...(id?{course_id:String(id)}:{}),...(regenerate?{regenerate:"true"}:{})}).toString():"")),
  studyPack:(topic:string,id?:number)=>req<any>("/study-pack",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,course_id:id||null,top_k:12})}),
+ // retry=false only shows a topic again: a result made while the AI was unavailable is not prepared again.
+ prepareTopic:(nodeId:string,courseId:number|undefined,size:SessionSize,tutor:string,retry=true)=>req<PreparedTopic>("/plan/topics/prepare",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({node_id:nodeId,course_id:courseId||null,size,tutor,retry})}),
  exportStudyPack:(topic:string,id:number|undefined,tutor:string,maxInputTokens:number,topicId?:string)=>req<StudyPackExport>("/study-pack/export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,topic_id:topicId||null,course_id:id||null,top_k:20,tutor,max_input_tokens:maxInputTokens})}),
  study:(question:string,id?:number,history:ChatTurn[]=[],retrievalScope:"space_only"|"space_and_related"|"all_sources"="space_only")=>req<any>("/study",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question,course_id:id||null,top_k:8,history:history.slice(-8),retrieval_scope:retrievalScope})}),
  learnerMastery:(courseId?:number)=>req<{concepts:ConceptMastery[]}>("/learner/mastery"+(courseId?"?course_id="+courseId:"")),

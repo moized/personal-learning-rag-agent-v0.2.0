@@ -6,6 +6,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl, Field
 from sqlalchemy import select, or_, func, delete
+from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import init_db, session_scope
 from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace, ChunkRelation, StudyProgress, StudyPlan, StudyPlanNode, Conversation, ConversationMessage, MaintenanceJob, SourceRelationship, Section
@@ -19,6 +20,7 @@ from .services.reliability import profile_needs_refresh
 from .services.study import answer
 from .services.curriculum import build_study_pack_prompt, build_external_study_pack
 from .services.plans import read_plan, request_updates_after_change
+from .services.units import OutlineTopic, StaleTopic, TopicNotFound, prepare_topic, topic_lock
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
 
 app = FastAPI(title=settings.app_name)
@@ -63,6 +65,16 @@ class ExternalStudyPackRequest(BaseModel):
     tutor: Literal["general", "chatgpt", "gemini", "claude"] = "general"
     topic_id: str | None = None
     retrieval_scope: Literal["space_only", "space_and_related", "all_sources"] = "space_only"
+
+
+class PrepareTopicRequest(BaseModel):
+    node_id: str = Field(min_length=1, max_length=100)
+    course_id: int | None = None
+    size: Literal["compact", "standard", "large", "xl"] = "standard"
+    tutor: Literal["general", "chatgpt", "gemini", "claude"] = "general"
+    # False when the topic is only shown again (the tutor changed, back to a parent): a result made
+    # while the AI was unavailable is then returned as it is instead of being prepared again.
+    retry: bool = True
 
 
 class StudyProgressRequest(BaseModel):
@@ -991,6 +1003,34 @@ def export_study_pack(req: ExternalStudyPackRequest):
         return {"topic": req.topic, "study_text": text_value, "sources": refs, "copy_paste_ready": True, **meta}
 
 
+@app.post("/plan/topics/prepare")
+def prepare_plan_topic(req: PrepareTopicRequest):
+    """A plan topic (or a part of one) prepared for one study session: a study unit, or its parts."""
+    ai = provider()
+    if hasattr(ai, "retry_max"):
+        # Someone is waiting: fail fast instead of backing off. A result made without the AI is
+        # marked provisional and prepared again when the topic is opened again.
+        ai.retry_max = 0
+    for attempt in range(2):
+        try:
+            with topic_lock(req.course_id, req.node_id, req.size), session_scope() as db:
+                return prepare_topic(db, ai, req.course_id, req.node_id, req.size, req.tutor, retry_provisional=req.retry)
+        except IntegrityError:  # another process prepared the same topic at the same moment
+            if attempt:
+                raise HTTPException(409, "This topic is being prepared; try again in a moment.")
+        except TopicNotFound:
+            raise HTTPException(404, "Study Plan topic not found")
+        except OutlineTopic:
+            raise HTTPException(422, "Outline topics group other topics; open one of its study topics")
+        except StaleTopic:
+            raise HTTPException(409, "The study plan changed since this part was made. Open its parent topic again.")
+
+
+def _is_plan_topic(db, scope: str, node_id: str) -> bool:
+    return db.execute(select(StudyPlanNode.id).join(StudyPlan, StudyPlanNode.plan_id == StudyPlan.id)
+                      .where(StudyPlan.scope_key == scope, StudyPlanNode.node_id == node_id)).first() is not None
+
+
 def _study_scope(course_id: int | None) -> str:
     return f"course:{course_id}" if course_id is not None else "all"
 
@@ -1017,8 +1057,11 @@ def update_study_progress(req: StudyProgressRequest):
             row = db.execute(select(StudyProgress).where(StudyProgress.scope_key == scope, StudyProgress.node_id == req.topic_id)
                              .order_by(StudyProgress.id)).scalars().first()
         title_row = db.execute(select(StudyProgress).where(StudyProgress.scope_key == scope, StudyProgress.topic_key == topic_key)).scalar_one_or_none()
-        # A row found by title belongs to this topic only if it has no id yet or the same id.
-        title_is_ours = title_row is not None and (not req.topic_id or title_row.node_id in (None, req.topic_id))
+        # A row found by title belongs to this topic only if it has the same id, or no id yet: rows saved
+        # before topics had ids belong to plan topics, never to a part of one that has the same title.
+        title_is_ours = title_row is not None and (
+            not req.topic_id or title_row.node_id == req.topic_id
+            or (title_row.node_id is None and _is_plan_topic(db, scope, req.topic_id)))
         if row is None and title_is_ours:
             row = title_row
         if req.completed:

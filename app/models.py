@@ -231,6 +231,34 @@ class StudyPlanNode(Base):
     )
 
 
+class TopicDetail(Base):
+    """A plan topic (or one of its parts) prepared for a study session of a given size.
+
+    Plan topics are prepared on demand: the result is a study unit (a pack of source passages
+    that fits the session) or a split into smaller parts, which are rows of their own. Rows are
+    reused while what their topic was made from (the plan's content and the topic's place in it) is unchanged.
+    """
+    __tablename__ = "topic_details"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope_key: Mapped[str] = mapped_column(String(80), index=True)
+    node_id: Mapped[str] = mapped_column(String(100), index=True)
+    parent_node_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    depth: Mapped[int] = mapped_column(Integer, default=0)
+    position: Mapped[int] = mapped_column(Integer, default=0)  # order among its parent's parts
+    budget_tokens: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(500))
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # For parts: the passages assigned to them when their parent was split.
+    chunk_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | unit | thin | split
+    # The version of the plan topic it was prepared from (see units.Topic.version).
+    plan_revision: Mapped[str] = mapped_column(String(64))
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    __table_args__ = (UniqueConstraint("scope_key", "node_id", "budget_tokens", name="uq_topic_detail"),)
+
+
 class SourceRelationship(Base):
     __tablename__ = "source_relationships"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

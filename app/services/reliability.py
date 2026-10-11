@@ -5,7 +5,12 @@ from ..providers.base import ProviderAuthenticationError, ProviderRateLimitError
 
 # Gemini wraps exhausted retries in a plain RuntimeError, so the status code and
 # transport failures are recognised from the message as well as from the type.
-_TRANSIENT_MESSAGE = re.compile(r"\b(429|500|502|503|504)\b|timed? ?out|connection|temporar|unavailable", re.IGNORECASE)
+# Being offline reads differently by platform, e.g. "[Errno 11001] getaddrinfo failed" on Windows.
+_TRANSIENT_MESSAGE = re.compile(
+    r"\b(429|500|502|503|504)\b|timed? ?out|connection|temporar|unavailable"
+    r"|getaddrinfo|name resolution|resolve host|unreachable|refused|reset by peer|network is down",
+    re.IGNORECASE,
+)
 
 
 def is_retryable_error(exc: BaseException) -> bool:
