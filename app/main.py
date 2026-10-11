@@ -21,6 +21,8 @@ from .services.study import answer
 from .services.curriculum import build_study_pack_prompt, build_external_study_pack
 from .services.plans import read_plan, request_updates_after_change
 from .services.units import OutlineTopic, StaleTopic, TopicNotFound, prepare_topic, topic_lock
+from .services.handoff import NoPlan, master_prompt
+from .services.progress import roll_up, save_progress
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
 
 app = FastAPI(title=settings.app_name)
@@ -1026,9 +1028,15 @@ def prepare_plan_topic(req: PrepareTopicRequest):
             raise HTTPException(409, "The study plan changed since this part was made. Open its parent topic again.")
 
 
-def _is_plan_topic(db, scope: str, node_id: str) -> bool:
-    return db.execute(select(StudyPlanNode.id).join(StudyPlan, StudyPlanNode.plan_id == StudyPlan.id)
-                      .where(StudyPlan.scope_key == scope, StudyPlanNode.node_id == node_id)).first() is not None
+@app.get("/plan/master-prompt")
+def plan_master_prompt(course_id: int | None = None, tutor: Literal["general", "chatgpt", "gemini", "claude"] = "general",
+                       path_id: str | None = None):
+    """The prompt that sets an external AI tutor up for the whole plan. Made from the saved plan and progress; no AI call."""
+    with session_scope() as db:
+        try:
+            return master_prompt(db, course_id, tutor, path_id)
+        except NoPlan:
+            raise HTTPException(404, "There is no study plan for this space yet")
 
 
 def _study_scope(course_id: int | None) -> str:
@@ -1049,32 +1057,11 @@ def study_progress(course_id: int | None = None):
 
 @app.post("/study-progress")
 def update_study_progress(req: StudyProgressRequest):
-    topic_key = " ".join(req.topic.casefold().split())
     scope = _study_scope(req.course_id)
     with session_scope() as db:
-        row = None
-        if req.topic_id:  # the topic id identifies progress across rewordings; titles can collide
-            row = db.execute(select(StudyProgress).where(StudyProgress.scope_key == scope, StudyProgress.node_id == req.topic_id)
-                             .order_by(StudyProgress.id)).scalars().first()
-        title_row = db.execute(select(StudyProgress).where(StudyProgress.scope_key == scope, StudyProgress.topic_key == topic_key)).scalar_one_or_none()
-        # A row found by title belongs to this topic only if it has the same id, or no id yet: rows saved
-        # before topics had ids belong to plan topics, never to a part of one that has the same title.
-        title_is_ours = title_row is not None and (
-            not req.topic_id or title_row.node_id == req.topic_id
-            or (title_row.node_id is None and _is_plan_topic(db, scope, req.topic_id)))
-        if row is None and title_is_ours:
-            row = title_row
-        if req.completed:
-            if row is None:
-                # The title may already be used by another topic's progress: keep both, with distinct keys.
-                key = topic_key if title_row is None else f"{topic_key}#{req.topic_id}"[:500]
-                db.add(StudyProgress(scope_key=scope, topic_key=key, topic_label=req.topic.strip(), node_id=req.topic_id, completed=True))
-            else:
-                row.topic_label = req.topic.strip()
-                row.node_id = row.node_id or req.topic_id
-                row.completed = True
-        elif row is not None:
-            db.delete(row)
+        save_progress(db, scope, req.topic, req.topic_id, req.completed)
+        if req.topic_id:
+            roll_up(db, scope, req.topic_id, req.completed)
         return {"topic": req.topic, "completed": req.completed}
 
 

@@ -147,6 +147,25 @@ def build_and_store_plan(db: Session, ai: AIProvider, course_id: int | None, *, 
     return plan
 
 
+def reading_order(nodes: list[StudyPlanNode]) -> list[StudyPlanNode]:
+    """The plan's nodes in the order the outline shows them: each node followed by its children."""
+    ids = {node.node_id for node in nodes}
+    children: dict[str | None, list[StudyPlanNode]] = {}
+    for node in nodes:  # saved order among siblings
+        children.setdefault(node.parent_node_id if node.parent_node_id in ids else None, []).append(node)
+    ordered: list[StudyPlanNode] = []
+    seen: set[int] = set()
+    stack = list(reversed(children.get(None, [])))
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:  # a malformed plan with a cycle
+            continue
+        seen.add(id(node))
+        ordered.append(node)
+        stack.extend(reversed(children.get(node.node_id, [])))
+    return ordered + [node for node in nodes if id(node) not in seen]  # parents in a cycle: keep them, last
+
+
 def _nodes(db: Session, plan: StudyPlan | None) -> list[StudyPlanNode]:
     if plan is None:
         return []

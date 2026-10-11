@@ -20,7 +20,8 @@ from sqlalchemy.orm import Session
 
 from ..models import Chunk, Concept, Course, Document, Evidence, Section, Source, StudyPlan, StudyPlanNode, TopicDetail
 from ..providers.base import AIProvider
-from .plans import scope_key
+from .plans import reading_order, scope_key
+from .progress import reopen
 from .reliability import is_retryable_error
 from .retrieval import retrieve
 
@@ -92,7 +93,9 @@ class Topic:
     chain: list[str]
     objective: str
     prerequisites: str
-    next_title: str | None
+    # What to study after this one, in the same learning path: {"id", "title", "depth"}; depth 0 is a
+    # plan topic, more is a part. None at the end of the path.
+    next: dict | None
     # What the prepared result depends on: the plan's content and this topic's place in it.
     # Parts share their plan topic's version; a cached row is valid while its version matches.
     version: str
@@ -111,15 +114,17 @@ def _plan_topic(nodes: dict[str, StudyPlanNode], order: list[str], node: StudyPl
     goal = str(root_meta.get("purpose") or "")
     if goal and goal != objective:
         objective = f"{objective}: {goal}" if objective else goal
-    study = [node_id for node_id in order if nodes[node_id].node_type == "study"]
+    study = [node_id for node_id in order if nodes[node_id].node_type == "study" and nodes[node_id].path_id == node.path_id]
     position = study.index(node.node_id) if node.node_id in study else -1
-    next_title = nodes[study[position + 1]].title if 0 <= position < len(study) - 1 else None
+    following = nodes[study[position + 1]] if 0 <= position < len(study) - 1 else None
+    next_item = {"id": following.node_id, "title": following.title, "depth": 0} if following is not None else None
+    next_title = next_item["title"] if next_item else None
     purpose = str(meta.get("purpose") or "")
     prerequisites = str(meta.get("prerequisites") or "")
     section_ids = [s for s in meta.get("section_ids") or [] if isinstance(s, int)]
     version = _digest([plan.revision, node.node_id, node.title, purpose, prerequisites, section_ids, chain, objective, next_title])
     return Topic(scope=scope, plan=plan, node_id=node.node_id, title=node.title, purpose=purpose, depth=0, section_ids=section_ids,
-                 chunk_ids=None, chain=chain, objective=objective, prerequisites=prerequisites, next_title=next_title, version=version)
+                 chunk_ids=None, chain=chain, objective=objective, prerequisites=prerequisites, next=next_item, version=version)
 
 
 def _detail(db: Session, scope: str, node_id: str, budget: int) -> TopicDetail | None:
@@ -144,7 +149,7 @@ def find_topic(db: Session, course_id: int | None, node_id: str, budget: int) ->
     if node_id in nodes:
         if nodes[node_id].node_type != "study":
             raise OutlineTopic(node_id)
-        return _plan_topic(nodes, [row.node_id for row in rows], nodes[node_id], scope, plan)
+        return _plan_topic(nodes, [row.node_id for row in reading_order(rows)], nodes[node_id], scope, plan)
     detail = _detail(db, scope, node_id, budget)
     if detail is None or not detail.parent_node_id:
         raise TopicNotFound(node_id)
@@ -153,10 +158,11 @@ def find_topic(db: Session, course_id: int | None, node_id: str, budget: int) ->
         raise StaleTopic(node_id)
     siblings = _children(db, scope, detail.parent_node_id, budget)
     position = [child.node_id for child in siblings].index(node_id)
-    next_title = siblings[position + 1].title if position < len(siblings) - 1 else parent.next_title
+    following = siblings[position + 1] if position < len(siblings) - 1 else None
+    next_item = {"id": following.node_id, "title": following.title, "depth": detail.depth} if following is not None else parent.next
     return Topic(scope=scope, plan=plan, node_id=node_id, title=detail.title, purpose=detail.purpose or "", depth=detail.depth,
                  section_ids=parent.section_ids, chunk_ids=json.loads(detail.chunk_ids_json or "[]"), chain=parent.chain + [parent.title],
-                 objective=parent.objective, prerequisites=parent.prerequisites, next_title=next_title, version=parent.version)
+                 objective=parent.objective, prerequisites=parent.prerequisites, next=next_item, version=parent.version)
 
 
 # ------------------------------------------------------------------ evidence
@@ -382,13 +388,15 @@ def _refresh_subtree(db: Session, scope: str, row: TopicDetail, version: str, *,
         _refresh_subtree(db, scope, child, version, force=force)
 
 
-def _store_parts(db: Session, topic: Topic, parts: list[dict], groups: list[dict], budget: int) -> None:
+def _store_parts(db: Session, topic: Topic, parts: list[dict], groups: list[dict], budget: int) -> bool:
     """Save the parts as rows of their own. A part with the same passages and title as before is kept with
     what was prepared inside it; a part with the same passages or title as before keeps its id, and so its
-    progress; any other part is new."""
+    progress; any other part is new. Returns True when the topic has passages its old parts did not have."""
     by_group = {g["id"]: g for g in groups}
     planned = [([chunk_id for group_id in part["group_ids"] for chunk_id in by_group[group_id]["chunk_ids"]], part) for part in parts]
     old = _children(db, topic.scope, topic.node_id, budget)
+    studied_from = {chunk_id for child in old for chunk_id in json.loads(child.chunk_ids_json or "[]")}
+    grew = bool(old) and any(chunk_id not in studied_from for chunk_ids, _ in planned for chunk_id in chunk_ids)
     exact = {(frozenset(json.loads(child.chunk_ids_json or "[]")), child.title.casefold()): child for child in old}
     kept: dict[int, TopicDetail] = {}
     for index, (chunk_ids, part) in enumerate(planned):
@@ -419,6 +427,7 @@ def _store_parts(db: Session, topic: Topic, parts: list[dict], groups: list[dict
                            position=index, budget_tokens=budget, title=part["title"], purpose=part["purpose"] or None,
                            chunk_ids_json=json.dumps(chunk_ids), status="pending", plan_revision=topic.version))
     db.flush()
+    return grew
 
 
 # ------------------------------------------------------------------------ pack
@@ -460,7 +469,7 @@ def _pack(db: Session, topic: Topic, primary: list[Chunk], related: list[tuple[C
             f"- Learning objective: {topic.objective}" if topic.objective else "",
             f"- This unit: {' > '.join(topic.chain + [topic.title])}",
             f"- Before this: {topic.prerequisites}" if topic.prerequisites.strip().casefold() not in {"", "none", "none recorded"} else "",
-            f"- Comes next: {topic.next_title}" if topic.next_title else ""]
+            f"- Comes next: {topic.next['title']}" if topic.next else ""]
     instructions = (f"You are my patient, rigorous study tutor. This session covers one unit of my study plan: {topic.title}."
                     + (f" Its purpose: {topic.purpose}" if topic.purpose else "")
                     + "\nUse the source excerpts below as the primary evidence. Explain clearly, define terms, connect ideas, and distinguish what"
@@ -524,7 +533,8 @@ def prepare_topic(db: Session, ai: AIProvider, course_id: int | None, node_id: s
                 return _response(db, topic, row, {**saved, **_provisional(issues)}, tutor, cached=True)
             parts = parts or plain
             if len(parts) >= 2:
-                _store_parts(db, topic, parts, groups, budget)
+                if _store_parts(db, topic, parts, groups, budget):
+                    reopen(db, topic.scope, topic.node_id, budget)  # new material to study: it is no longer done
                 payload = {"reason": f"About {primary_tokens:,} tokens of source material: more than one {size} session holds "
                                      f"({budget_for_sources:,} tokens for sources), so it is divided into {len(parts)} parts.",
                            "source_tokens": primary_tokens, "split_key": key, **_provisional(issues)}
@@ -568,7 +578,7 @@ def _provisional(issues: list[str]) -> dict:
 
 def _response(db: Session, topic: Topic, row: TopicDetail, payload: dict, tutor: str, *, cached: bool) -> dict:
     out = {"node_id": topic.node_id, "title": topic.title, "purpose": topic.purpose, "status": row.status, "depth": topic.depth,
-           "budget_tokens": row.budget_tokens, "trail": topic.chain, "next_title": topic.next_title, "cached": cached,
+           "budget_tokens": row.budget_tokens, "trail": topic.chain, "next": topic.next, "cached": cached,
            "children": None, **{key: value for key, value in payload.items() if key != "split_key"}}
     if "study_text" in out:
         out["study_text"] = out["study_text"].replace(TUTOR_PLACEHOLDER, TUTOR_NAMES.get(tutor, "any AI tutor"))

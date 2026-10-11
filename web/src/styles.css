@@ -66,6 +66,8 @@
 .source-coverage{margin-top:5px;color:#5f735f;font-size:11px}.source-coverage.pending{color:#9a6a24}
 .plan-status{display:flex;align-items:center;gap:6px;margin:10px 0 0;color:#6f756b;font-size:11px}.plan-status.updating,.plan-status.outdated{color:#7a6a2c}.plan-status.failed{color:var(--orange)}
 .unit-settings{display:grid;grid-template-columns:repeat(2,minmax(0,220px));gap:11px;margin-top:16px}.study-unit{margin-top:16px}.unit-trail{display:flex;flex-wrap:wrap;align-items:center;gap:2px;color:#6f756b;font-size:12px}.unit-trail strong{color:#313a31}.link-button{padding:0;border:0;background:transparent;color:var(--green-dark);font:inherit;cursor:pointer;text-decoration:underline;text-underline-offset:3px}.unit-parts{margin-top:10px;padding:0;border:1px solid #e8e9e2;border-radius:11px}.unit-done{display:inline-flex;align-items:center;gap:7px;margin-top:6px;color:#445344;font-size:12px;cursor:pointer}.unit-empty{margin-top:14px}
-@media(max-width:760px){.unit-settings{grid-template-columns:1fr}}
+@media(max-width:760px){.unit-settings{grid-template-columns:1fr}.plan-section-heading{flex-wrap:wrap}}
+.master-preview{margin:12px 0 0;max-height:380px;overflow:auto;padding:12px;border:1px solid #ecece6;border-radius:9px;background:#fbfbf8;color:#3b443b;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
 /* Outline topics have no checkbox: let the title use the whole row. */.outline-topic>.outline-topic-button:first-child{grid-column:1/-1}
 .link-button:disabled,.outline-topic-button:disabled{cursor:progress;opacity:.6}
+.unit-next{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:12px}.unit-next .plan-help{margin:0}.unit-empty{display:grid;justify-items:start;gap:8px}
