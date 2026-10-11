@@ -117,7 +117,8 @@ def build_and_store_plan(db: Session, ai: AIProvider, course_id: int | None, *, 
     if plan is not None and plan.revision == revision and not force:
         return plan
     previous = [{"id": node.node_id, "title": node.title, "parent_id": node.parent_node_id, "type": node.node_type,
-                 "section_ids": json.loads(node.metadata_json or "{}").get("section_ids") or []}
+                 "section_ids": json.loads(node.metadata_json or "{}").get("section_ids") or [],
+                 "section_titles": json.loads(node.metadata_json or "{}").get("section_titles") or []}
                 for node in _nodes(db, plan)] if plan is not None else None
     rendered, structured_nodes = build_syllabus_structured(db, ai, course_id, previous_nodes=previous, heartbeat=heartbeat)
     relationships_json = json.dumps({

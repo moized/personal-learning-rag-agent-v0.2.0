@@ -65,8 +65,9 @@ class Worker(threading.Thread):
                 job.status = "queued"
         self._requeue_stale_maintenance()
         with session_scope() as db:
-            # No plan build is running in a worker that is just starting: one left "running" was
-            # interrupted, and rebuilding is safe because its paid steps were saved as they finished.
+            # No plan build is running in a worker that is just starting (one app process per
+            # database, as documented): one left "running" was interrupted, and rebuilding is safe
+            # because its paid steps were saved as they finished.
             for interrupted in db.execute(select(MaintenanceJob).where(MaintenanceJob.task == PLAN_TASK, MaintenanceJob.status == "running")).scalars():
                 interrupted.status = "queued"
         while not self.stop_event.is_set():

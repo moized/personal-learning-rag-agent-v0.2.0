@@ -216,6 +216,8 @@ Return JSON relationships with source_a_id, source_b_id, type, confidence (0..1)
             for item in result.get("relationships", []):
                 a, b = sorted((int(item["source_a_id"]), int(item["source_b_id"])))
                 generated[(a, b)] = item
+        except ProviderQuotaExceededError:
+            raise
         except Exception:
             generated = {}
             warnings.append("The AI service was unavailable while comparing sources, so they are shown as separate paths for now.")
@@ -293,20 +295,26 @@ def _namespaced(nodes: list, source_id: int) -> list[dict]:
 
 def _normalize_nodes(raw_nodes: list[dict], path_id: str, source_ids: set[int], roles: dict[int, str],
                      previous_ids: frozenset[str] = frozenset(), section_ids: frozenset[int] = frozenset(),
-                     used: set[str] | None = None, previous_by_sections: dict | None = None) -> list[dict]:
-    """Validate model output and give every topic a stable id.
+                     used: set[str] | None = None, previous_by_sections: dict | None = None,
+                     section_titles: dict[int, str] | None = None) -> list[dict]:
+    """Validate model output and give every topic a stable id, in three passes over the outline:
 
-    A topic keeps an id from the previous outline when the model reuses it, or when it is the
-    same kind of topic over exactly the same sections (a reworded rebuild); otherwise its id comes
-    from its title. `used` is shared by all paths of a plan, so no id can appear twice.
+    1. an id the model reused from the previous outline;
+    2. the id of the previous topic of the same kind over exactly the same sections (matched by
+       section id and title, since ids are recycled after a source is removed), preferring the
+       topic with the same title when several claim it;
+    3. an id from the title, with a counter if it is taken; a topic is never dropped.
+    `used` is shared by all paths of a plan, so no id can appear twice.
     """
-    id_map: dict[str, str] = {}
     used = set() if used is None else used
     used.add(path_id)  # the path root's id is taken
     by_sections = previous_by_sections or {}
-    nodes = []
+    titles_of = section_titles or {}
+    entries = []
     seen_titles: set[str] = set()
     for raw in raw_nodes:
+        if not isinstance(raw, dict):
+            continue
         title = str(raw.get("title", "")).strip()
         local_id = str(raw.get("id", "")).strip()
         kind = raw.get("type")
@@ -314,31 +322,51 @@ def _normalize_nodes(raw_nodes: list[dict], path_id: str, source_ids: set[int], 
             continue
         seen_titles.add(title.casefold())
         raw_sections = raw.get("section_ids") if isinstance(raw.get("section_ids"), list) else []
-        cited_sections = list(dict.fromkeys(x for x in raw_sections if isinstance(x, int) and not isinstance(x, bool) and x in section_ids))
-        node_id = None
+        sections = list(dict.fromkeys(x for x in raw_sections if isinstance(x, int) and not isinstance(x, bool) and x in section_ids))
+        entries.append({"raw": raw, "title": title, "local_id": local_id, "kind": kind, "sections": sections, "id": None})
+
+    for entry in entries:
+        local_id = entry["local_id"]
         if local_id in previous_ids and local_id not in used and not local_id.startswith("path-"):
-            node_id = local_id
-        if node_id is None and cited_sections:
-            match = by_sections.get((kind, frozenset(cited_sections)))
-            if match and match not in used:
-                node_id = match
-        if node_id is None:
-            stem = f"{path_id}:{title.casefold()}"
+            entry["id"] = local_id
+            used.add(local_id)
+    claims: dict[str, list[tuple[dict, str]]] = {}
+    for entry in entries:
+        if entry["id"] is None and entry["sections"]:
+            match = by_sections.get((entry["kind"], frozenset((sid, titles_of.get(sid, "")) for sid in entry["sections"])))
+            if match and match[0] not in used:
+                claims.setdefault(match[0], []).append((entry, match[1]))
+    for previous_id, claimants in claims.items():
+        same_title = [entry for entry, previous_title in claimants if entry["title"].casefold() == previous_title.casefold()]
+        chosen = same_title[0] if same_title else (claimants[0][0] if len(claimants) == 1 else None)
+        if chosen is not None:
+            chosen["id"] = previous_id
+            used.add(previous_id)
+    for entry in entries:
+        if entry["id"] is None:
+            stem = f"{path_id}:{entry['title'].casefold()}"
             node_id = "t-" + hashlib.sha1(stem.encode()).hexdigest()[:12]
             attempt = 0
             while node_id in used:  # a reused id took this title's id: derive another, never drop the topic
                 attempt += 1
                 node_id = "t-" + hashlib.sha1(f"{stem}:{attempt}".encode()).hexdigest()[:12]
-        used.add(node_id)
-        id_map[local_id] = node_id
+            entry["id"] = node_id
+            used.add(node_id)
+
+    def confidence(value) -> float:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    id_map: dict[str, str] = {}
+    nodes = []
+    for entry in entries:
+        raw = entry["raw"]
+        id_map[entry["local_id"]] = entry["id"]
         cited_ids = [int(x) for x in raw.get("source_ids", []) if str(x).isdigit() and int(x) in source_ids]
-        def confidence(value) -> float:
-            try:
-                return max(0.0, min(1.0, float(value)))
-            except (TypeError, ValueError):
-                return 0.0
-        nodes.append({"node_id": node_id, "local_parent": str(raw.get("parent_id") or "none"), "node_type": kind,
-                      "title": title, "source_ids": cited_ids,
+        nodes.append({"node_id": entry["id"], "local_parent": str(raw.get("parent_id") or "none"), "node_type": entry["kind"],
+                      "title": entry["title"], "source_ids": cited_ids,
                       "source_roles": list(dict.fromkeys(str(x) for x in raw.get("source_roles", []))) or [roles[sid] for sid in cited_ids],
                       "purpose": str(raw.get("purpose", "")), "prerequisites": str(raw.get("prerequisites", "")),
                       "prerequisite_confidence": confidence(raw.get("prerequisite_confidence", 0.0)),
@@ -346,7 +374,8 @@ def _normalize_nodes(raw_nodes: list[dict], path_id: str, source_ids: set[int], 
                       "topic_merge_confidence": confidence(raw.get("topic_merge_confidence", 0.0)),
                       "core_or_supplementary": str(raw.get("core_or_supplementary", "core")),
                       "comes_after": [str(x) for x in raw.get("comes_after", [])],
-                      "section_ids": cited_sections})
+                      "section_ids": entry["sections"],
+                      "section_titles": [titles_of.get(sid, "") for sid in entry["sections"]]})
     for node in nodes:
         node["parent_node_id"] = id_map.get(node.pop("local_parent"))
     return nodes
@@ -418,7 +447,16 @@ def build_syllabus_structured(db: Session, ai: AIProvider, course_id: int | None
     if heartbeat is not None:
         heartbeat()
     candidates = _candidate_pairs(db, [item["id"] for item in sources], max(1, settings.plan_compare_k))
-    relationships = _classify_relationships(db, ai, sources, warnings, candidates)
+    quota_out = False
+    quota_warning = "The AI service's daily quota is used up, so some sources are not in this plan yet. Press Refresh after the quota resets."
+    try:
+        relationships = _classify_relationships(db, ai, sources, warnings, candidates)
+    except ProviderQuotaExceededError:
+        if previous_nodes:
+            raise PlanQuotaExhausted("The AI service's daily quota is used up, so the previous plan is kept. Press Refresh after the quota resets.")
+        quota_out = True
+        warnings.append(quota_warning)
+        relationships = []  # not compared yet: shown as separate paths in this first plan
     db.commit()  # save comparisons now: a later failure must not throw away calls already paid for
     source_paths = group_source_paths([item["id"] for item in sources], relationships)
     by_id = {item["id"]: item for item in sources}
@@ -426,7 +464,6 @@ def build_syllabus_structured(db: Session, ai: AIProvider, course_id: int | None
     # Extract each source curriculum independently before considering any merge.
     independent = []
     reused = 0
-    quota_out = False
     for item in sources:
         sid, profile = item["id"], item["profile"]
         curriculum = {"nodes": [], "knowledge": [], "skills": [], "capabilities": [], "applications": []}
@@ -441,7 +478,7 @@ def build_syllabus_structured(db: Session, ai: AIProvider, course_id: int | None
                 db.commit()  # keep this source's new outline even if a later step fails
         except ProviderQuotaExceededError:
             quota_out = True
-            warnings.append("The AI service's daily quota is used up, so some sources are not in this plan yet. Press Refresh after the quota resets.")
+            warnings.append(quota_warning)
         independent.append({"source_id": sid, "title": item["name"], "profile": profile, **curriculum})
     if quota_out and previous_nodes:
         # Replacing a complete plan with a partial one would hide topics and progress.
@@ -450,7 +487,7 @@ def build_syllabus_structured(db: Session, ai: AIProvider, course_id: int | None
 
     path_inputs = []
     for index, member_ids in enumerate(source_paths, 1):
-        members = [row for row in independent if row["source_id"] in member_ids]
+        members = [{**row, "nodes": _namespaced(row.get("nodes", []), row["source_id"])} for row in independent if row["source_id"] in member_ids]
         titles = [row["profile"].get("course_title") for row in members if row["profile"].get("course_title")]
         goals = [row["profile"].get("primary_learning_goal") for row in members if row["profile"].get("primary_learning_goal")]
         relationships_in_path = [rel for rel in relationships if rel["source_a_id"] in member_ids and rel["source_b_id"] in member_ids]
@@ -491,11 +528,18 @@ Source identity classifications: {json.dumps(relationships, ensure_ascii=False)}
             if heartbeat is not None:
                 heartbeat()
             result = ai.generate_json(prompt, task="syllabus", schema=schema)
+        merge_failed = False
+    except ProviderQuotaExceededError:
+        if previous_nodes:
+            raise PlanQuotaExhausted("The AI service's daily quota is used up, so the previous plan is kept. Press Refresh after the quota resets.")
+        merge_failed = True
     except Exception:
+        merge_failed = True
+    if merge_failed:
         warnings.append("Could not merge the sources into one plan, so each source's own topics are shown.")
         result = {"paths": [{"path_id": path["path_id"], "title": path["suggested_title"], "source_ids": path["source_ids"],
                   "primary_goal": path["suggested_title"], "knowledge": [], "skills": [], "capabilities": [], "applications": [],
-                  "nodes": [node for item in path["source_curricula"] for node in _namespaced(item.get("nodes", []), item["source_id"])]} for path in path_inputs],
+                  "nodes": [node for item in path["source_curricula"] for node in item.get("nodes", [])]} for path in path_inputs],
                   "cross_path_relations": [], "shared_foundations": []}
 
     # Treat model output as untrusted: it may only return the exact groups
@@ -520,7 +564,7 @@ Source identity classifications: {json.dumps(relationships, ensure_ascii=False)}
                 "source_ids": path["source_ids"], "primary_goal": path["suggested_title"],
                 "knowledge": [], "skills": [], "capabilities": [], "applications": [],
                 "nodes": [node for source_curriculum in path["source_curricula"]
-                          for node in _namespaced(source_curriculum.get("nodes", []), source_curriculum["source_id"])],
+                          for node in source_curriculum.get("nodes", [])],
             }
 
     source_names = {item["id"]: item["name"] for item in sources}
@@ -528,12 +572,15 @@ Source identity classifications: {json.dumps(relationships, ensure_ascii=False)}
     persisted = []
     member_sets = [{int(i) for i in path.get("source_ids", []) if str(i).isdigit() and int(i) in source_names} for path in returned_paths.values()]
     used_ids: set[str] = {f"path-{min(members)}" for members in member_sets if members}
+    section_titles = {section["id"]: section["title"] for item in sources for section in item["sections"]}
     section_keys: dict = {}
     for node in previous_nodes or []:
         secs = node.get("section_ids") or []
-        if secs and not str(node.get("id") or "").startswith("path-"):
-            key = (node.get("type"), frozenset(secs))
-            section_keys[key] = None if key in section_keys else node.get("id")  # ambiguous matches are not used
+        names = node.get("section_titles") or []
+        if secs and len(names) == len(secs) and not str(node.get("id") or "").startswith("path-"):
+            key = (node.get("type"), frozenset(zip(secs, names)))
+            # Ambiguous matches are not used.
+            section_keys[key] = None if key in section_keys else (node.get("id"), str(node.get("title") or ""))
     previous_by_sections = {key: value for key, value in section_keys.items() if value}
     for path in returned_paths.values():
         member_ids = {int(item) for item in path.get("source_ids", []) if str(item).isdigit() and int(item) in source_names}
@@ -553,7 +600,8 @@ Source identity classifications: {json.dumps(relationships, ensure_ascii=False)}
         persisted.append({"node_id": path_key, "parent_node_id": None, "node_type": "outline", "path_id": path_key, "title": title, "metadata_json": json.dumps(root_meta, ensure_ascii=False)})
         valid_sections = frozenset(section["id"] for sid in member_ids for section in by_id[sid]["sections"])
         nodes = _normalize_nodes(path.get("nodes", []), path_key, member_ids, source_roles,
-                                 frozenset(n["id"] for n in previous if n.get("id")), valid_sections, used_ids, previous_by_sections)
+                                 frozenset(n["id"] for n in previous if n.get("id")), valid_sections, used_ids, previous_by_sections,
+                                 section_titles)
         node_ids = {node["node_id"] for node in nodes}
         for node in nodes:
             parent_id = node.get("parent_node_id") if node.get("parent_node_id") in node_ids else path_key
