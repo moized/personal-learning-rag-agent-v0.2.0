@@ -25,6 +25,8 @@ class StudyProgress(Base):
     scope_key: Mapped[str] = mapped_column(String(80), index=True)
     topic_key: Mapped[str] = mapped_column(String(500))
     topic_label: Mapped[str] = mapped_column(String(500))
+    # The study-plan topic this progress belongs to; survives a rebuild that rewords the title.
+    node_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     completed: Mapped[bool] = mapped_column(default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
     __table_args__ = (UniqueConstraint("scope_key", "topic_key", name="uq_study_progress_scope_topic"),)
@@ -49,6 +51,9 @@ class Source(Base):
     status: Mapped[str] = mapped_column(String(30), default="queued")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     profile_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # This source's own topic outline, reused by study plans until its content fingerprint changes.
+    curriculum_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    curriculum_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

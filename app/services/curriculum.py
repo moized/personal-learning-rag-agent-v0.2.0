@@ -77,8 +77,8 @@ Current indexed concepts:
     return "\n".join(rows), persisted
 
 
-def build_syllabus_structured(db: Session, ai: AIProvider, course_id: int | None = None) -> tuple[str, list[dict]]:
-    return build_source_first_syllabus(db, ai, course_id)
+def build_syllabus_structured(db: Session, ai: AIProvider, course_id: int | None = None, **options) -> tuple[str, list[dict]]:
+    return build_source_first_syllabus(db, ai, course_id, **options)
 
 
 def build_syllabus(db: Session, ai: AIProvider, course_id: int | None = None) -> str:

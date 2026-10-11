@@ -165,12 +165,15 @@ def test_maintenance_item_error_is_recorded_and_job_continues(tmp_path, monkeypa
 
 def test_study_plan_reuses_persisted_source_revision(tmp_path, monkeypatch):
     client, sessions, engine = _scope(tmp_path, monkeypatch)
-    from app import main
+    from app.services import plans
+    from tests.plan_jobs import run_plan_jobs
     calls = []
-    monkeypatch.setattr(main, "build_syllabus_structured", lambda db, ai, course_id: (calls.append(course_id) or "| syllabus |", [{"node_id": "T1", "parent_node_id": None, "node_type": "study", "title": "Foundations", "metadata_json": "{}"}]))
+    monkeypatch.setattr(plans, "build_syllabus_structured", lambda db, ai, course_id, **options: (calls.append(course_id) or "| syllabus |", [{"node_id": "T1", "parent_node_id": None, "node_type": "study", "title": "Foundations", "metadata_json": "{}"}]))
     with sessions() as db:
         db.add(Source(name="Indexed source", source_type="transcript", status="done"))
         db.commit()
+    client.get("/syllabus")
+    run_plan_jobs(sessions)
     first = client.get("/syllabus").json()
     with sessions() as db:
         plan = db.query(StudyPlan).filter_by(scope_key="all").one()

@@ -64,3 +64,4 @@
 .status-dot.needs_input{background:#c26b47}
 .source-card{flex-wrap:wrap}.source-card-content{flex:1 1 260px}.source-card-actions{flex-wrap:wrap}
 .source-coverage{margin-top:5px;color:#5f735f;font-size:11px}.source-coverage.pending{color:#9a6a24}
+.plan-status{display:flex;align-items:center;gap:6px;margin:10px 0 0;color:#6f756b;font-size:11px}.plan-status.updating,.plan-status.outdated{color:#7a6a2c}.plan-status.failed{color:var(--orange)}

@@ -1,6 +1,4 @@
 import json
-import hashlib
-import threading
 from collections import defaultdict
 from datetime import datetime, timedelta, UTC
 from typing import Literal
@@ -8,7 +6,6 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl, Field
 from sqlalchemy import select, or_, func, delete
-from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import init_db, session_scope
 from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace, ChunkRelation, StudyProgress, StudyPlan, StudyPlanNode, Conversation, ConversationMessage, MaintenanceJob, SourceRelationship, Section
@@ -20,7 +17,8 @@ from .providers.factory import provider
 from .routers.learner import router as learner_router
 from .services.reliability import profile_needs_refresh
 from .services.study import answer
-from .services.curriculum import build_syllabus, build_syllabus_structured, build_study_pack_prompt, build_external_study_pack
+from .services.curriculum import build_study_pack_prompt, build_external_study_pack
+from .services.plans import read_plan, request_updates_after_change
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
 
 app = FastAPI(title=settings.app_name)
@@ -33,14 +31,6 @@ app.add_middleware(
 )
 app.include_router(learner_router)
 worker: Worker | None = None
-_study_plan_locks: dict[str, threading.Lock] = {}
-_study_plan_locks_guard = threading.Lock()
-
-
-def _study_plan_lock(scope_key: str) -> threading.Lock:
-    """Serialize cache refreshes for one plan scope within this API process."""
-    with _study_plan_locks_guard:
-        return _study_plan_locks.setdefault(scope_key, threading.Lock())
 
 
 class ChatTurn(BaseModel):
@@ -77,6 +67,7 @@ class ExternalStudyPackRequest(BaseModel):
 
 class StudyProgressRequest(BaseModel):
     topic: str = Field(min_length=1, max_length=500)
+    topic_id: str | None = Field(default=None, max_length=100)
     course_id: int | None = None
     completed: bool = True
 
@@ -314,11 +305,14 @@ def move_source_to_course(source_id: int, req: SourceCourseRequest):
             raise HTTPException(status_code=404, detail="Source not found")
         if req.course_id is not None and db.get(Course, req.course_id) is None:
             raise HTTPException(status_code=404, detail="Course not found")
+        previous_course = source.course_id
         source.course_id = req.course_id
         source.assignment_mode = "explicit_course" if req.course_id is not None else "explicit_unassigned"
         source.assignment_status = "assigned" if req.course_id is not None else "unassigned"
         source.assignment_reason = "Changed explicitly in the library."
         db.flush()
+        if source.status == "done" and previous_course != req.course_id:
+            request_updates_after_change(db, {previous_course, req.course_id})
         return {"id": source.id, "course_id": source.course_id}
 
 
@@ -391,7 +385,10 @@ def remove_source(source_id: int, failed_attempts_only: bool = False):
                 candidate = Path(item.local_path).resolve()
                 if candidate.is_relative_to(upload_root):
                     local_paths.append(candidate)
+        affected_courses = {item.course_id for item in related_sources if item.status == "done"}
         db.execute(delete(Source).where(Source.id.in_(source_ids)))
+        if affected_courses:
+            request_updates_after_change(db, affected_courses)
 
     for path in local_paths:
         if path.exists():
@@ -945,100 +942,10 @@ def study(req: StudyRequest):
 
 @app.get("/syllabus")
 def syllabus(course_id: int | None = None, regenerate: bool = False):
-    """Return the cached plan, or rebuild it when sources changed or `regenerate` is set."""
-    scope_key = f"course:{course_id}" if course_id is not None else "all"
-    # Frontend navigation, query refreshes, and multiple tabs can request the same
-    # stale plan at once. Build it once per scope; other callers read the result.
-    with _study_plan_lock(scope_key):
-        return _get_or_build_syllabus(course_id, scope_key, force=regenerate)
-
-
-def _plan_response(plan: StudyPlan, nodes: list[StudyPlanNode]) -> dict:
-    """Shape a stored plan for the API, tolerating older relationship formats."""
-    try:
-        saved = json.loads(plan.relationships_json or "{}")
-    except (TypeError, json.JSONDecodeError):
-        saved = {}
-    if not isinstance(saved, dict):
-        saved = {"sources": saved if isinstance(saved, list) else []}
-    relationships = {
-        key: saved.get(key) if isinstance(saved.get(key), list) else []
-        for key in ("sources", "cross_paths", "shared_foundations")
-    }
-    warnings = [w for w in saved["warnings"] if isinstance(w, str)] if isinstance(saved.get("warnings"), list) else []
-    return {
-        "syllabus": plan.syllabus, "revision": plan.revision, "generated_at": plan.generated_at.isoformat(),
-        "nodes": [_study_plan_node_json(node) for node in nodes],
-        "source_relationships": relationships,
-        # Parts of the plan that could not be built (for example the AI service was
-        # unavailable). The plan is still saved so it can be shown; Refresh rebuilds it.
-        "warnings": warnings,
-    }
-
-
-def _get_or_build_syllabus(course_id: int | None, scope_key: str, force: bool = False):
+    """The saved study plan and its status. Never calls the AI: plans are built in the
+    background when their content changes, or when `regenerate` asks for a rebuild."""
     with session_scope() as db:
-        sources_query = select(Source).where(Source.status == "done").order_by(Source.id)
-        if course_id is not None:
-            sources_query = sources_query.where(Source.course_id == course_id)
-        revisions = [(s.id, s.updated_at.isoformat() if s.updated_at else "") for s in db.execute(sources_query).scalars().all()]
-        if course_id is not None:
-            course_revision = db.get(Course, course_id)
-            if course_revision:
-                revisions.append(("course", course_revision.id, course_revision.updated_at.isoformat() if course_revision.updated_at else "", course_revision.outline or ""))
-        revision = hashlib.sha256(json.dumps(revisions).encode()).hexdigest()
-        plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope_key)).scalar_one_or_none()
-
-        def stored_nodes() -> list[StudyPlanNode]:
-            return db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
-
-        if plan and plan.revision == revision and not force:
-            return _plan_response(plan, stored_nodes())
-        rendered, structured_nodes = build_syllabus_structured(db, provider(), course_id)
-        relationships = {
-            "sources": db.info.get("syllabus_source_relationships", []),
-            "cross_paths": db.info.get("syllabus_cross_path_relations", []),
-            "shared_foundations": db.info.get("syllabus_shared_foundations", []),
-            "warnings": db.info.get("syllabus_warnings", []),
-        }
-        relationships_json = json.dumps(relationships, ensure_ascii=False)
-
-        def overwrite(existing: StudyPlan) -> None:
-            existing.revision = revision
-            existing.syllabus = rendered
-            existing.relationships_json = relationships_json
-            existing.generated_at = datetime.now(UTC)
-            db.query(StudyPlanNode).filter(StudyPlanNode.plan_id == existing.id).delete(synchronize_session=False)
-
-        if plan is None:
-            plan = StudyPlan(scope_key=scope_key, revision=revision, syllabus=rendered, relationships_json=relationships_json)
-            db.add(plan)
-            try:
-                db.flush()
-            except IntegrityError as exc:
-                # Another process may have inserted the unique plan scope after
-                # our initial read. Re-read its result instead of surfacing a 500.
-                if "scope_key" not in str(exc.orig).lower():
-                    raise
-                db.rollback()
-                plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope_key)).scalar_one_or_none()
-                if plan is None:
-                    raise
-                if plan.revision == revision and not force:
-                    return _plan_response(plan, stored_nodes())
-                # Source data changed while the competing request was building;
-                # refresh the winner with the revision this request calculated.
-                overwrite(plan)
-        else:
-            overwrite(plan)
-        for node_data in structured_nodes:
-            db.add(StudyPlanNode(plan_id=plan.id, **node_data))
-        db.flush()
-        return _plan_response(plan, stored_nodes())
-
-
-def _study_plan_node_json(node: StudyPlanNode) -> dict:
-    return {"id": node.node_id, "parent_id": node.parent_node_id, "path_id": node.path_id, "type": node.node_type, "title": node.title, "metadata": json.loads(node.metadata_json or "{}")}
+        return read_plan(db, course_id, regenerate=regenerate)
 
 
 @app.post("/study-pack")
@@ -1094,21 +1001,34 @@ def study_progress(course_id: int | None = None):
         rows = db.execute(select(StudyProgress).where(
             StudyProgress.scope_key == _study_scope(course_id), StudyProgress.completed.is_(True)
         )).scalars().all()
-        return {"completed_topics": [row.topic_label for row in rows]}
+        return {"completed_topics": [row.topic_label for row in rows],
+                "completed_topic_ids": [row.node_id for row in rows if row.node_id],
+                # Saved before topics had ids: these can only be matched by title.
+                "completed_legacy_topics": [row.topic_label for row in rows if not row.node_id]}
 
 
 @app.post("/study-progress")
 def update_study_progress(req: StudyProgressRequest):
     topic_key = " ".join(req.topic.casefold().split())
+    scope = _study_scope(req.course_id)
     with session_scope() as db:
-        row = db.execute(select(StudyProgress).where(
-            StudyProgress.scope_key == _study_scope(req.course_id), StudyProgress.topic_key == topic_key
-        )).scalar_one_or_none()
+        row = None
+        if req.topic_id:  # the topic id identifies progress across rewordings; titles can collide
+            row = db.execute(select(StudyProgress).where(StudyProgress.scope_key == scope, StudyProgress.node_id == req.topic_id)
+                             .order_by(StudyProgress.id)).scalars().first()
+        title_row = db.execute(select(StudyProgress).where(StudyProgress.scope_key == scope, StudyProgress.topic_key == topic_key)).scalar_one_or_none()
+        # A row found by title belongs to this topic only if it has no id yet or the same id.
+        title_is_ours = title_row is not None and (not req.topic_id or title_row.node_id in (None, req.topic_id))
+        if row is None and title_is_ours:
+            row = title_row
         if req.completed:
             if row is None:
-                db.add(StudyProgress(scope_key=_study_scope(req.course_id), topic_key=topic_key, topic_label=req.topic.strip(), completed=True))
+                # The title may already be used by another topic's progress: keep both, with distinct keys.
+                key = topic_key if title_row is None else f"{topic_key}#{req.topic_id}"[:500]
+                db.add(StudyProgress(scope_key=scope, topic_key=key, topic_label=req.topic.strip(), node_id=req.topic_id, completed=True))
             else:
                 row.topic_label = req.topic.strip()
+                row.node_id = row.node_id or req.topic_id
                 row.completed = True
         elif row is not None:
             db.delete(row)

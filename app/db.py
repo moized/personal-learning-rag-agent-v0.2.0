@@ -34,6 +34,8 @@ def _migrate_sqlite() -> None:
         return
     source_columns = {c["name"] for c in inspect(engine).get_columns("sources")} if "sources" in inspect(engine).get_table_names() else set()
     _add_missing_columns("sources", {
+        "curriculum_json": "curriculum_json TEXT",
+        "curriculum_hash": "curriculum_hash VARCHAR(64)",
         "course_id": "course_id INTEGER",
         "topic_hint": "topic_hint VARCHAR(500)",
         "description": "description TEXT",
@@ -67,6 +69,7 @@ def _migrate_sqlite() -> None:
         # create_all only indexes new tables; columns added above need their index explicitly.
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chunks_section_id ON chunks (section_id)"))
     _add_missing_columns("study_plans", {"relationships_json": "relationships_json TEXT"})
+    _add_missing_columns("study_progress", {"node_id": "node_id VARCHAR(100)"})
     _add_missing_columns("study_plan_nodes", {"path_id": "path_id VARCHAR(100) DEFAULT 'main'"})
     with engine.begin() as conn:
         conn.execute(text("UPDATE chunks SET chunk_kind='leaf' WHERE chunk_kind IS NULL"))

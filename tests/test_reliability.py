@@ -268,11 +268,16 @@ def test_plan_built_during_an_outage_reports_warnings_and_regenerates_cleanly(se
         source.profile_json = json.dumps({**GOOD_PROFILE, "schema_version": 2})
         db.commit()
 
+    from tests.plan_jobs import run_plan_jobs
+
     state = {"provider": _plan_provider(fail_syllabus=True)}
     monkeypatch.setattr(main, "session_scope", scope)
-    monkeypatch.setattr(main, "provider", lambda: state["provider"])
+    monkeypatch.setattr(worker_module, "session_scope", scope)
+    monkeypatch.setattr(worker_module, "provider", lambda: state["provider"])
     client = TestClient(main.app)
 
+    assert client.get("/syllabus").json()["status"] == "updating"
+    run_plan_jobs(sessions)
     broken = client.get("/syllabus").json()
     assert any("Could not extract topics" in w for w in broken["warnings"])
     assert any("No study topics" in w for w in broken["warnings"])
@@ -280,7 +285,9 @@ def test_plan_built_during_an_outage_reports_warnings_and_regenerates_cleanly(se
     assert client.get("/syllabus").json()["warnings"] == broken["warnings"]  # the warnings are saved with the plan
 
     state["provider"] = _plan_provider(fail_syllabus=False)
-    healed = client.get("/syllabus", params={"regenerate": "true"}).json()
+    assert client.get("/syllabus", params={"regenerate": "true"}).json()["status"] == "updating"
+    run_plan_jobs(sessions)
+    healed = client.get("/syllabus").json()
     assert healed["warnings"] == []
     assert [n["title"] for n in healed["nodes"] if n["type"] == "study"] == ["Gradient descent"]
     assert client.get("/syllabus").json()["warnings"] == []

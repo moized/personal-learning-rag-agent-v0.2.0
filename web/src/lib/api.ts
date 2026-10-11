@@ -2,6 +2,7 @@ export type Course={id:number;name:string;description?:string|null;domain?:strin
 export type SourceIssue={document_id:number;title:string;status:"needs_input"|"failed";message?:string|null}
 export type Source={id:number;name:string;source_type:string;course_id?:number|null;course_name?:string|null;assignment_mode?:string;assignment_status?:string;assignment_reason?:string|null;status:string;status_message?:string|null;topic_hint?:string|null;domain_hint?:string|null;description?:string|null;failed_attempt_count?:number;document_count?:number;section_count?:number;concept_count?:number;index_pending?:number;sections_pending?:number;concepts_pending?:number;issues?:SourceIssue[]}
 export type PasteFormat="plain"|"srt"|"vtt"
+export type PlanStatus="empty"|"ready"|"updating"|"outdated"|"failed"
 export type Job={id:number;source_id:number;source_name?:string|null;source_type?:string|null;source_uri?:string|null;course_id?:number|null;status:string;stage:string;progress:string;checkpoint?:string|null;retry_count:number;created_at?:string|null;started_at?:string|null;updated_at?:string|null;error_message?:string|null}
 export type MaintenanceJob={id:number;task:string;status:"queued"|"running"|"done"|"failed";progress_current:number;progress_total:number;checkpoint?:string|null;errors:Record<string,string>;updated_at?:string|null}
 export type Stats={sources:number;documents:number;chunks:number;embedded:number;grouped:number;concept_indexed:number}
@@ -36,8 +37,8 @@ export const api={
  pasteSourceText:(sourceId:number,text:string,format:PasteFormat)=>req<{source_id:number;job_id:number}>(`/sources/${sourceId}/text`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,input_format:format})}),
  reprocessSource:(sourceId:number)=>req<{source_id:number;job_id:number;documents_retried:number}>(`/sources/${sourceId}/reprocess`,{method:"POST"}),
  removeSource:(sourceId:number,failedAttemptsOnly=false)=>req<{removed:boolean;source_id:number;removed_count:number}>(`/sources/${sourceId}${failedAttemptsOnly?"?failed_attempts_only=true":""}`,{method:"DELETE"}),
- studyProgress:(courseId?:number)=>req<{completed_topics:string[]}>("/study-progress"+(courseId?"?course_id="+courseId:"")),
- updateStudyProgress:(topic:string,courseId:number|undefined,completed:boolean)=>req<any>("/study-progress",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,course_id:courseId||null,completed})}),
+ studyProgress:(courseId?:number)=>req<{completed_topics:string[];completed_topic_ids?:string[];completed_legacy_topics?:string[]}>("/study-progress"+(courseId?"?course_id="+courseId:"")),
+ updateStudyProgress:(topic:string,courseId:number|undefined,completed:boolean,topicId?:string)=>req<any>("/study-progress",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,topic_id:topicId||null,course_id:courseId||null,completed})}),
  jobs:()=>req<Job[]>("/jobs"),
  organizeExisting:(includeUnassigned=true)=>req<Pick<MaintenanceJob,"id"|"status"|"progress_current"|"progress_total"|"checkpoint">&{deduplicated:boolean}>("/maintenance/organize-existing?include_unassigned="+includeUnassigned,{method:"POST"}),
  maintenanceJobs:()=>req<MaintenanceJob[]>("/maintenance/jobs"),
@@ -68,7 +69,7 @@ export const api={
   if(meta.description)q.set("description",meta.description)
   return req<{source_id:number;job_id:number|null;status:string;deduplicated?:boolean;assignment_conflict?:boolean;course_id?:number|null}>("/sources/youtube?"+q.toString(),{method:"POST"})
  },
- syllabus:(id?:number,regenerate=false)=>req<{syllabus:string;revision:string;source_relationships:{sources:any[];cross_paths:any[];shared_foundations:string[]};nodes:{id:string;parent_id:string|null;path_id:string;type:"outline"|"study";title:string;metadata:Record<string,any>}[];warnings?:string[]}>("/syllabus"+(id||regenerate?"?"+new URLSearchParams({...(id?{course_id:String(id)}:{}),...(regenerate?{regenerate:"true"}:{})}).toString():"")),
+ syllabus:(id?:number,regenerate=false)=>req<{syllabus:string;revision:string;source_relationships:{sources:any[];cross_paths:any[];shared_foundations:string[]};nodes:{id:string;parent_id:string|null;path_id:string;type:"outline"|"study";title:string;metadata:Record<string,any>}[];warnings?:string[];status?:PlanStatus;error?:string|null;up_to_date?:boolean;generated_at?:string|null}>("/syllabus"+(id||regenerate?"?"+new URLSearchParams({...(id?{course_id:String(id)}:{}),...(regenerate?{regenerate:"true"}:{})}).toString():"")),
  studyPack:(topic:string,id?:number)=>req<any>("/study-pack",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,course_id:id||null,top_k:12})}),
  exportStudyPack:(topic:string,id:number|undefined,tutor:string,maxInputTokens:number,topicId?:string)=>req<StudyPackExport>("/study-pack/export",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,topic_id:topicId||null,course_id:id||null,top_k:20,tutor,max_input_tokens:maxInputTokens})}),
  study:(question:string,id?:number,history:ChatTurn[]=[],retrievalScope:"space_only"|"space_and_related"|"all_sources"="space_only")=>req<any>("/study",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question,course_id:id||null,top_k:8,history:history.slice(-8),retrieval_scope:retrievalScope})}),

@@ -15,6 +15,7 @@ from .ingestion import parse_file, chunk_text, list_youtube_entries, fetch_youtu
 from .grouping import choose_group, merge_centroid
 from .concepts import concepts_available, extract_batch_concepts, pending_concept_batches
 from .sections import build_source_sections
+from .plans import PLAN_TASK, build_and_store_plan, plan_revision, request_updates_after_change
 from .knowledge_graph import add_sequence_relations, extract_source_relations
 from .agent import set_plan
 from .reliability import is_retryable_error, profile_needs_refresh
@@ -63,6 +64,11 @@ class Worker(threading.Thread):
                     job.retry_count = 0
                 job.status = "queued"
         self._requeue_stale_maintenance()
+        with session_scope() as db:
+            # No plan build is running in a worker that is just starting: one left "running" was
+            # interrupted, and rebuilding is safe because its paid steps were saved as they finished.
+            for interrupted in db.execute(select(MaintenanceJob).where(MaintenanceJob.task == PLAN_TASK, MaintenanceJob.status == "running")).scalars():
+                interrupted.status = "queued"
         while not self.stop_event.is_set():
             # Sources the user added come first; background maintenance runs when no job waits.
             with session_scope() as db:
@@ -151,8 +157,23 @@ class Worker(threading.Thread):
                                 job.status = "queued"
                         return
                     with session_scope() as db:
-                        if db.get(Source, item_id) is not None:
+                        source = db.get(Source, item_id)
+                        if source is not None:
                             extract_source_relations(db, ai, item_id, before_window=lambda: self._touch_maintenance(job_id))
+                            request_updates_after_change(db, {source.course_id})
+                if item_kind == "plan":
+                    with session_scope() as db:
+                        # Record the content version being built: if it fails, readers see "failed"
+                        # for this version instead of queuing the same failing build again. The item is
+                        # re-read so a Refresh that upgraded it to a forced build is not lost.
+                        stamped = db.get(MaintenanceJob, job_id)
+                        fresh = json.loads(stamped.items_json or "[]")
+                        item = {**item, **(fresh[index] if index < len(fresh) and isinstance(fresh[index], dict) else {})}
+                        item["revision"] = plan_revision(db, item.get("course_id"))
+                        stamped.items_json = json.dumps([item])
+                    with session_scope() as db:
+                        build_and_store_plan(db, ai, item.get("course_id"), force=bool(item.get("force")),
+                                             heartbeat=lambda: self._touch_maintenance(job_id))
                 with session_scope() as db:
                     if item_kind == "chunk":
                         chunk = db.get(Chunk, item_id)
@@ -933,6 +954,8 @@ Chunk:
             src.error = None
             job.status = "done"
             job.stage = "done"
+            # The source's study plan is refreshed in the background, before anyone opens it.
+            request_updates_after_change(db, {src.course_id})
             job.progress_current = job.progress_total
             job.checkpoint = "done"
             db.commit()

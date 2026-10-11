@@ -312,11 +312,17 @@ def _concept_title(db: Session, chunk_ids: list[int], number: int) -> str:
 
 
 def build_source_sections(db: Session, source: Source) -> int:
-    """Replace this source's sections with ones derived from its current structure."""
+    """Rebuild this source's sections from its current structure.
+
+    The row at each position is reused, so a rebuild of unchanged structure keeps every
+    section id. Study plans reference sections by id and fingerprint them, so unstable ids
+    would invalidate cached outlines and topic links for no reason.
+    """
+    existing = {section.position: section for section in db.execute(select(Section).where(Section.source_id == source.id)).scalars()}
     db.execute(update(Chunk).where(Chunk.section_id.in_(select(Section.id).where(Section.source_id == source.id))).values(section_id=None))
-    db.execute(delete(Section).where(Section.source_id == source.id))
     groups = _documents_with_chunks(db, source.id)
     if not groups:
+        db.execute(delete(Section).where(Section.source_id == source.id))
         return 0
     suffix = Path(source.local_path or source.name or "").suffix.lower()
     if source.source_type == "youtube":
@@ -335,16 +341,24 @@ def build_source_sections(db: Session, source: Source) -> int:
         segments = _text_segments(groups, use_headings, strict, capital)
     created = 0
     part_number = 0
+    kept: set[int] = set()
     for position, (title, kind, chunks) in enumerate(segments):
         if not chunks:
             continue
         if kind == "part":
             part_number += 1
             title = _concept_title(db, [c.id for c in chunks], part_number)
-        section = Section(source_id=source.id, document_id=chunks[0].document_id, position=position,
-                          title=_clean_title(title or "Untitled section", 500) or "Untitled section", kind=kind, chunk_count=len(chunks))
-        db.add(section)
+        section = existing.get(position)
+        if section is None:
+            section = Section(source_id=source.id, position=position)
+            db.add(section)
+        section.document_id = chunks[0].document_id
+        section.title = _clean_title(title or "Untitled section", 500) or "Untitled section"
+        section.kind = kind
+        section.chunk_count = len(chunks)
         db.flush()
+        kept.add(section.id)
         db.execute(update(Chunk).where(Chunk.id.in_([c.id for c in chunks])).values(section_id=section.id))
         created += 1
+    db.execute(delete(Section).where(Section.source_id == source.id, Section.id.not_in(kept or {-1})))
     return created

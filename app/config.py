@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     pdf_pages_per_part: int = 10
     # A "running" maintenance job with no heartbeat for this long is treated as interrupted.
     maintenance_stale_seconds: int = 600
+    # Study plans: compare each source only with its most similar sources, and cap the
+    # number of sections described to the model per source.
+    plan_compare_k: int = 4
+    plan_section_limit: int = 150
 
     dense_candidate_k: int = 24
     lexical_candidate_k: int = 24
