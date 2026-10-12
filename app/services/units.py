@@ -39,6 +39,8 @@ PASSAGE_OVERHEAD = (4 + LABEL_CHARS + 3 + LABEL_CHARS + 9 + 10 + 1 + 2 + 2) // 3
 MAX_PARTS = 6
 TUTOR_NAMES = {"chatgpt": "ChatGPT", "gemini": "Gemini", "claude": "Claude"}
 TUTOR_PLACEHOLDER = "{{TUTOR}}"
+DONE_WORDS = "unit done"  # what the learner writes to end a unit; unusual enough not to come up by accident
+PACK_FORMAT = 2           # bumped when the pack text changes, so cached units are made again
 
 
 class TopicNotFound(LookupError):
@@ -122,7 +124,7 @@ def _plan_topic(nodes: dict[str, StudyPlanNode], order: list[str], node: StudyPl
     purpose = str(meta.get("purpose") or "")
     prerequisites = str(meta.get("prerequisites") or "")
     section_ids = [s for s in meta.get("section_ids") or [] if isinstance(s, int)]
-    version = _digest([plan.revision, node.node_id, node.title, purpose, prerequisites, section_ids, chain, objective, next_title])
+    version = _digest([PACK_FORMAT, plan.revision, node.node_id, node.title, purpose, prerequisites, section_ids, chain, objective, next_title])
     return Topic(scope=scope, plan=plan, node_id=node.node_id, title=node.title, purpose=purpose, depth=0, section_ids=section_ids,
                  chunk_ids=None, chain=chain, objective=objective, prerequisites=prerequisites, next=next_item, version=version)
 
@@ -477,6 +479,8 @@ def _pack(db: Session, topic: Topic, primary: list[Chunk], related: list[tuple[C
                       " an answer, say what is missing instead of guessing.\nTeach this unit only; if a prerequisite is missing, explain it briefly"
                       " and come back. Start by giving me a short overview, then teach one idea at a time. Ask a quick check question and wait for"
                       " my answer before moving on. Adapt to my answers and correct misunderstandings kindly. Do not dump the whole lesson at once."
+                    + f'\nWhen I write "{DONE_WORDS}", give me a recap of this unit in at most five bullet points and three review questions'
+                      " (without the answers) to keep for later."
                     + f"\nThis prompt is prepared for {TUTOR_PLACEHOLDER}; keep the response interactive and easy to read.")
     text = f"# Study unit: {topic.title}\n\n## Where this fits\n" + "\n".join(line for line in fits if line)
     text += f"\n\n## Tutor instructions (paste this with the excerpts)\n{instructions}\n\n## Source excerpts\n" + "\n\n".join(b for _, b in kept)

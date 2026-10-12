@@ -15,11 +15,10 @@ from sqlalchemy.orm import Session
 from ..models import Course, StudyPlan, StudyPlanNode, StudyProgress
 from .plans import reading_order, scope_key
 from .progress import plan_topic_of, topic_key
-from .units import TUTOR_NAMES, estimate_tokens
+from .units import DONE_WORDS, TUTOR_NAMES, estimate_tokens
 
 # Above this the outline lists titles only, so the prompt stays a practical size to paste.
 DETAILED_OUTLINE_TOKENS = 5000
-DONE_WORDS = "unit done"  # what the learner writes to end a unit; unusual enough not to come up by accident
 
 
 class NoPlan(LookupError):

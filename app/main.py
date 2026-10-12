@@ -9,22 +9,22 @@ from sqlalchemy import select, or_, func, delete
 from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import init_db, session_scope
-from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace, ChunkRelation, StudyProgress, StudyPlan, StudyPlanNode, Conversation, ConversationMessage, MaintenanceJob, SourceRelationship, Section, SourceSpace
+from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace, ChunkRelation, StudyProgress, StudyPlan, StudyPlanNode, Conversation, ConversationMessage, MaintenanceJob, SourceRelationship, Section, SourceSpace, TopicDetail
 from .services.concepts import CONCEPT_PASS
 from .services.files import save_upload, save_text_content
 from .services.queue import enqueue
 from .services.worker import Worker
 from .providers.factory import provider
 from .routers.learner import router as learner_router
-from .services.reliability import profile_needs_refresh
 from .services.study import answer
 from .services.curriculum import build_study_pack_prompt, build_external_study_pack
 from .services.plans import read_plan, request_updates_after_change
 from .services.units import OutlineTopic, StaleTopic, TopicNotFound, prepare_topic, topic_lock
 from .services.handoff import NoPlan, master_prompt
-from .services.progress import roll_up, save_progress
+from .services.progress import plan_topic_of, roll_up, save_progress
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
 from .services.spaces import also_in, in_space, spaces_of
+from .services.organize import index_pending, queue_organization
 from .services.placement import keep_here, keep_out, request_placement_check, suggestions as placement_suggestions
 
 app = FastAPI(title=settings.app_name)
@@ -260,7 +260,7 @@ def sources(course_id: int | None = None):
         section_counts = dict(db.execute(
             select(Section.source_id, func.count(Section.id)).where(Section.source_id.in_(ids)).group_by(Section.source_id)
         ).all()) if ids else {}
-        # What "Organize existing" would still do: leaves without a section, and leaves not yet read
+        # What organizing still has to do: leaves without a section, and leaves not yet read
         # in full for concepts (only when concept extraction is enabled).
         def leaf_counts(condition):
             return dict(db.execute(
@@ -268,7 +268,7 @@ def sources(course_id: int | None = None):
                 .where(Document.source_id.in_(ids), Chunk.chunk_kind == "leaf", condition)
                 .group_by(Document.source_id)
             ).all()) if ids else {}
-        pending_counts = leaf_counts(_index_pending())
+        pending_counts = leaf_counts(index_pending())
         sections_pending = leaf_counts(Chunk.section_id.is_(None))
         concepts_pending = leaf_counts(Chunk.concept_pass < CONCEPT_PASS) if settings.concept_extraction else {}
         concept_counts = dict(db.execute(
@@ -436,16 +436,18 @@ def remove_source(source_id: int, failed_attempts_only: bool = False):
         ).first()
         if active_job:
             raise HTTPException(status_code=409, detail="This source is still processing. Wait until it finishes before removing it.")
-        # "Organize existing" reads sources without a Job; removing one mid-read would leave links
-        # to deleted concepts, so wait for its remaining items to pass this source.
+        # Organizing reads sources without a Job; removing the one being read right now would leave links
+        # to deleted concepts. Sources still waiting in a run are fine: the worker skips removed sources.
         heartbeat_cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=settings.maintenance_stale_seconds)
         for maintenance in db.execute(select(MaintenanceJob).where(MaintenanceJob.status.in_(["queued", "running"]))).scalars().all():
             live = worker is not None and worker.current_maintenance_id == maintenance.id
             if maintenance.status == "running" and not live and maintenance.updated_at and maintenance.updated_at < heartbeat_cutoff:
                 continue  # left over from an interrupted run; the worker will requeue it
-            pending = json.loads(maintenance.items_json or "[]")[maintenance.progress_current:]
+            if maintenance.status != "running":
+                continue
+            pending = json.loads(maintenance.items_json or "[]")[maintenance.progress_current:maintenance.progress_current + 1]
             if any(isinstance(item, dict) and item.get("kind") in {"concepts", "source"} and int(item.get("id", -1)) in source_ids for item in pending):
-                raise HTTPException(status_code=409, detail="LearnOS is still organizing this source in the background. Try again when Organize existing finishes.")
+                raise HTTPException(status_code=409, detail="LearnOS is still organizing this source in the background. Try again in a moment, when LearnOS has finished organizing it.")
 
         document_ids = [row[0] for row in db.execute(select(Document.id).where(Document.source_id.in_(source_ids))).all()]
         chunk_rows = db.execute(select(Chunk.id, Chunk.parent_chunk_id).where(Chunk.document_id.in_(document_ids))).all() if document_ids else []
@@ -490,14 +492,6 @@ def remove_source(source_id: int, failed_attempts_only: bool = False):
         if path.exists():
             path.unlink()
     return {"removed": True, "source_id": source_id, "removed_count": len(source_ids)}
-
-
-def _index_pending():
-    """Leaves that still need reading for concepts (when enabled) or a section."""
-    condition = Chunk.section_id.is_(None)
-    if settings.concept_extraction:
-        condition = condition | (Chunk.concept_pass < CONCEPT_PASS)
-    return condition
 
 
 def _has_active_job(db, source_id: int) -> bool:
@@ -858,40 +852,9 @@ def _job_error_message(job: Job) -> str | None:
 @app.post("/maintenance/organize-existing")
 def enqueue_existing_organization(include_unassigned: bool = True):
     with session_scope() as db:
-        active = db.execute(select(MaintenanceJob).where(MaintenanceJob.task == "organize_existing", MaintenanceJob.status.in_(["queued", "running"])).order_by(MaintenanceJob.id.desc()).limit(1)).scalar_one_or_none()
-        if active:
-            return {"id": active.id, "status": active.status, "progress_current": active.progress_current, "progress_total": active.progress_total, "checkpoint": active.checkpoint, "deduplicated": True}
-        chunk_ids = db.execute(select(Chunk.id).join(Document, Chunk.document_id == Document.id).join(Source, Document.source_id == Source.id).where(Chunk.chunk_kind == "leaf", Chunk.embedding_status == "done", (Chunk.group_id.is_(None)) | (Chunk.classification_status != "done"), Source.status == "done").order_by(Chunk.id)).scalars().all()
-        done_sources = db.execute(select(Source).where(Source.status == "done").order_by(Source.id)).scalars().all()
-        source_items = []
-        for source in done_sources:
-            try:
-                profile = json.loads(source.profile_json or "{}")
-            except json.JSONDecodeError:
-                profile = {}
-            needs_profile = profile_needs_refresh(profile)
-            should_assign = source.course_id is None and (source.assignment_mode == "auto" or include_unassigned)
-            if needs_profile or should_assign:
-                source_item = {"kind": "source", "id": source.id}
-                if should_assign:
-                    # The user explicitly requested organization, so only unassigned sources
-                    # are eligible for metadata based placement. Existing assignments stay fixed.
-                    source_item["auto_assign_unassigned"] = source.assignment_mode != "auto"
-                source_items.append(source_item)
-        # Sources whose chunks were never read in full for concepts, or that have no sections yet.
-        unread = set(db.execute(
-            select(Document.source_id).join(Chunk, Chunk.document_id == Document.id).join(Source, Document.source_id == Source.id)
-            .where(Source.status == "done", Chunk.chunk_kind == "leaf", _index_pending())
-            .distinct()
-        ).scalars().all())
-        concept_items = [{"kind": "concepts", "id": source_id} for source_id in sorted(unread)]
-        # Last, once profiles and concepts are current: check where each source belongs (pairs judged before cost nothing).
-        placement_items = [{"kind": "placement", "id": source.id} for source in done_sources] if len(done_sources) > 1 else []
-        items = [{"kind": "chunk", "id": chunk_id} for chunk_id in chunk_ids] + source_items + concept_items + placement_items
-        row = MaintenanceJob(task="organize_existing", status="queued" if items else "done", progress_total=len(items), items_json=json.dumps(items))
-        db.add(row)
-        db.flush()
-        return {"id": row.id, "status": row.status, "progress_current": row.progress_current, "progress_total": row.progress_total, "checkpoint": row.checkpoint, "deduplicated": False}
+        row, running = queue_organization(db, include_unassigned=include_unassigned)
+        return {"id": row.id, "status": row.status, "progress_current": row.progress_current, "progress_total": row.progress_total,
+                "checkpoint": row.checkpoint, "deduplicated": running}
 
 
 @app.get("/maintenance/jobs")
@@ -1136,13 +1099,27 @@ def _study_scope(course_id: int | None) -> str:
 @app.get("/study-progress")
 def study_progress(course_id: int | None = None):
     with session_scope() as db:
+        scope = _study_scope(course_id)
         rows = db.execute(select(StudyProgress).where(
-            StudyProgress.scope_key == _study_scope(course_id), StudyProgress.completed.is_(True)
+            StudyProgress.scope_key == scope, StudyProgress.completed.is_(True)
         )).scalars().all()
+        done = {row.node_id for row in rows if row.node_id}
+        topic_of = plan_topic_of(db, scope)  # part id -> its plan topic
+        sizes: dict[str, dict[int, int]] = {}  # plan topic -> {session size: studied parts}
+        for node_id, budget in db.execute(select(TopicDetail.node_id, TopicDetail.budget_tokens).where(
+                TopicDetail.scope_key == scope, TopicDetail.node_id.in_(done))).all() if done else []:
+            if node_id in topic_of:
+                sizes.setdefault(topic_of[node_id], {}).setdefault(budget, 0)
+                sizes[topic_of[node_id]][budget] += 1
+        partly = sorted({topic_of[i] for i in done if i in topic_of} - done)
         return {"completed_topics": [row.topic_label for row in rows],
                 "completed_topic_ids": [row.node_id for row in rows if row.node_id],
                 # Saved before topics had ids: these can only be matched by title.
-                "completed_legacy_topics": [row.topic_label for row in rows if not row.node_id]}
+                "completed_legacy_topics": [row.topic_label for row in rows if not row.node_id],
+                # Plan topics with some of their parts studied, but not all.
+                "partly_done_topic_ids": partly,
+                # The session size most of its studied parts were made for: reopening it there continues it.
+                "partly_done_budgets": {topic: max(sizes[topic], key=lambda budget: sizes[topic][budget]) for topic in partly if topic in sizes}}
 
 
 @app.post("/study-progress")

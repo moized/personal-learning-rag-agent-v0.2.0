@@ -377,7 +377,7 @@ def test_organize_existing_backfills_older_sources(env, monkeypatch):
     queued = env.client.post("/maintenance/organize-existing").json()
     with env.sessions() as db:
         items = json.loads(db.get(MaintenanceJob, queued["id"]).items_json)
-        assert {"kind": "concepts", "id": source_id} in items
+        assert {"kind": "concepts", "id": source_id} in [{"kind": item["kind"], "id": item["id"]} for item in items]
     ai = Scripted()
     monkeypatch.setattr(worker_module, "provider", lambda: ai)
     Worker()._process_maintenance_job(queued["id"])

@@ -1,5 +1,5 @@
 import {useEffect,useMemo,useRef,useState,type FormEvent,type KeyboardEvent,type ReactNode} from "react"
-import {Brain,Check,Copy,Download,FileText,FolderOpen,GraduationCap,Library,LoaderCircle,MessageSquare,Paperclip,Plus,RefreshCw,Send,Sparkles,Trash2,UploadCloud,X} from "lucide-react"
+import {Brain,Check,ChevronDown,ChevronRight,Copy,Download,FileText,FolderOpen,GraduationCap,Library,LoaderCircle,MessageSquare,Paperclip,Plus,RefreshCw,Send,Sparkles,Trash2,UploadCloud,X} from "lucide-react"
 import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type PasteFormat,type MasterPrompt,type PlanStatus,type PreparedTopic,type SessionSize,type Source,type StudyPackExport} from "./lib/api"
 import LearnView from "./Learn"
 
@@ -121,17 +121,19 @@ function MarkdownText({text}:{text:string}){
 }
 
 function plural(count:number,word:string){return `${count.toLocaleString()} ${word}${count===1?"":"s"}`}
-const NEW_CHAT="Paste it at the start of a chat, then paste one study unit. When the chat gets long, start a new chat and paste a fresh copy first: it includes your latest progress."
 const TUTOR_SETUP:Record<string,string>={
-  general:NEW_CHAT,
-  chatgpt:`In ChatGPT: ${NEW_CHAT} If you use Projects, you can instead put it in a project's instructions and open one chat per study unit; update the instructions when you copy a newer version.`,
-  claude:`In Claude: ${NEW_CHAT} If you use Projects, you can instead put it in a project's instructions and open one chat per study unit; update the instructions when you copy a newer version.`,
-  gemini:`In Gemini: ${NEW_CHAT} If you use Gems, you can instead create a Gem with it as the instructions and open one chat per study unit; update the Gem when you copy a newer version.`,
+  general:"Paste it into your AI tool's project or custom instructions, then open a new chat there for each study session.",
+  chatgpt:"In ChatGPT, create a Project and paste it into the project's instructions, then open a new chat in the project for each study session.",
+  claude:"In Claude, create a Project and paste it into the project's instructions, then open a new chat in the project for each study session.",
+  gemini:"In Gemini, create a Gem with it as the Gem's instructions, then start a new chat with the Gem for each study session.",
 }
+const SIZE_TOKENS:Record<SessionSize,number>={compact:4000,standard:8000,large:16000,xl:32000}
+function remembered(key:string,allowed:string[],fallback:string){try{const value=localStorage.getItem(key);return value&&allowed.includes(value)?value:fallback}catch{return fallback}}
+function remember(key:string,value:string){try{localStorage.setItem(key,value)}catch{/* not remembered in this browser */}}
 function fileSlug(title:string){return title.normalize("NFKD").replace(/\p{M}+/gu,"").replace(/[^\p{L}\p{N}]+/gu,"-").replace(/^-+|-+$/g,"").slice(0,80).toLowerCase()||"study-unit"}
 function downloadText(name:string,text:string){const url=URL.createObjectURL(new Blob([text],{type:"text/markdown;charset=utf-8"}));const link=document.createElement("a");link.href=url;link.download=name;link.click();window.setTimeout(()=>URL.revokeObjectURL(url),1000)}
 
-function CopyAnswer({text}:{text:string}){
+function CopyAnswer({text,label="Copy",primary=false}:{text:string;label?:string;primary?:boolean}){
   const[copied,setCopied]=useState(false)
   const timer=useRef<number|undefined>(undefined)
   useEffect(()=>()=>window.clearTimeout(timer.current),[])
@@ -142,14 +144,29 @@ function CopyAnswer({text}:{text:string}){
       setCopied(true);timer.current=window.setTimeout(()=>setCopied(false),1800)
     }catch{setCopied(false)}
   }
-  return <button type="button" className="copy-answer" onClick={()=>void copy()} aria-label={copied?"Answer copied":"Copy answer"} title={copied?"Copied":"Copy answer"}>{copied?<Check size={14}/>:<Copy size={14}/>}<span>{copied?"Copied":"Copy"}</span></button>
+  return <button type="button" className={primary?"btn primary copy-primary":"copy-answer"} onClick={()=>void copy()} aria-label={copied?"Copied":label} title={copied?"Copied":label}>{copied?<Check size={primary?16:14}/>:<Copy size={primary?16:14}/>}<span>{copied?"Copied":label}</span></button>
 }
 
+const VIEWS:View[]=["plan","library","learn","chat"]
+function readLocation():{view:View;courseId?:number}{
+  const match=window.location.hash.match(/^#\/(\w+)(?:\?space=(\d+))?$/)
+  const view=match&&VIEWS.includes(match[1] as View)?match[1] as View:"plan"
+  return {view,courseId:match?.[2]?Number(match[2]):undefined}
+}
+function locationFor(view:View,courseId?:number){return `#/${view}${courseId?`?space=${courseId}`:""}`}
+
 export default function App(){
-  const[view,setView]=useState<View>("plan")
+  const initial=useMemo(readLocation,[])
+  const[view,setView]=useState<View>(initial.view)
   const[courses,setCourses]=useState<Course[]>([])
-  const[courseId,setCourseId]=useState<number>()
+  const[courseId,setCourseId]=useState<number|undefined>(initial.courseId)
+  useEffect(()=>{const target=locationFor(view,courseId);if(window.location.hash===target)return;const shown=readLocation()
+    // A new place gets a history entry; the same place written differently (or no address yet) is just corrected.
+    if(window.location.hash&&(shown.view!==view||shown.courseId!==courseId))window.history.pushState(null,"",target);else window.history.replaceState(null,"",target)},[view,courseId])
+  useEffect(()=>{const follow=()=>{const next=readLocation();setView(next.view);setCourseId(next.courseId)};window.addEventListener("popstate",follow);window.addEventListener("hashchange",follow);return()=>{window.removeEventListener("popstate",follow);window.removeEventListener("hashchange",follow)}},[])
+
   const[sources,setSources]=useState<Source[]>([])
+  const[sourcesFor,setSourcesFor]=useState<string|null>(null)  // the space the source list was loaded for
   const[jobs,setJobs]=useState<Job[]>([])
   const[messages,setMessages]=useState<ChatMessage[]>([])
   const[conversations,setConversations]=useState<ConversationSummary[]>([])
@@ -178,7 +195,9 @@ export default function App(){
       const becameReady=j.some(job=>previousJobStates.current.get(job.id)!==undefined&&
         !terminal.has(previousJobStates.current.get(job.id)!)&&terminal.has(job.status))
       previousJobStates.current=new Map(j.map(job=>[job.id,job.status]))
-      setCourses(c);setJobs(j);setHealth(h);setSources(s)
+      setCourses(c);setJobs(j);setHealth(h);setSources(s);setSourcesFor(courseId===undefined?"all":String(courseId))
+      // A space in an old link that no longer exists: show all sources instead (checked against the list just loaded).
+      if(courseId!==undefined&&!c.some(course=>course.id===courseId)){window.history.replaceState(null,"",locationFor(readLocation().view));setCourseId(undefined)}
       if(becameReady)setPlanRefreshKey(key=>key+1)
     }catch(e){setError(e instanceof Error?e.message:"Could not connect to LearnOS")}
   }
@@ -258,15 +277,17 @@ export default function App(){
 
   return <div className="app-shell">
     <aside className="sidebar">
-      <button className="brand" onClick={()=>setView("chat")}><span className="brand-mark"><Sparkles size={17}/></span><span>LearnOS</span></button>
+      <button className="brand" onClick={()=>setView("plan")}><span className="brand-mark"><Sparkles size={17}/></span><span>LearnOS</span></button>
+      <nav className="primary-nav" aria-label="Main navigation">
+        <button className={view==="plan"?"selected":""} onClick={()=>setView("plan")}><GraduationCap size={17}/>Study plan</button>
+        <button className={view==="library"?"selected":""} onClick={()=>setView("library")}><Library size={17}/>Library <span className="nav-count">{sources.length}</span></button>
+        <button className={view==="learn"?"selected":""} onClick={()=>setView("learn")}><Brain size={17}/>Practice</button>
+        <button className={view==="chat"?"selected":""} onClick={()=>setView("chat")}><MessageSquare size={17}/>Chat</button>
+      </nav>
+      <div className="sidebar-chats">
       <Button variant="outline" disabled={busy} onClick={()=>void newChat()}><Plus size={16}/>New chat</Button>
       <div className="sidebar-section"><div className="sidebar-label">Recent chats</div>{conversations.slice(0,12).map(chat=><div className="source-shortcut" key={chat.id}><button className="text-link" disabled={busy} onClick={()=>void openChat(chat.id)} title={chat.title}>{chat.title}</button><button className="icon-button" disabled={busy} aria-label="Delete conversation" onClick={()=>void removeChat(chat.id)}><Trash2 size={13}/></button></div>)}{!conversations.length&&<p className="sidebar-empty">Your conversations will appear here.</p>}</div>
-      <nav className="primary-nav" aria-label="Main navigation">
-        <button className={view==="chat"?"selected":""} onClick={()=>setView("chat")}><MessageSquare size={17}/>Chat</button>
-        <button className={view==="plan"?"selected":""} onClick={()=>setView("plan")}><GraduationCap size={17}/>Study plan</button>
-        <button className={view==="learn"?"selected":""} onClick={()=>setView("learn")}><Brain size={17}/>Practice</button>
-        <button className={view==="library"?"selected":""} onClick={()=>setView("library")}><Library size={17}/>Library <span className="nav-count">{sources.length}</span></button>
-      </nav>
+      </div>
       <div className="sidebar-section"><div className="sidebar-label">Your library</div>
         {sources.slice(0,5).map(source=><button className="source-shortcut" key={source.id} onClick={()=>setView("library")} title={source.name}><FileText size={15}/><span>{sourceTitle(source)}</span><i className={`status-dot ${source.status}`} /></button>)}
         {!sources.length&&<p className="sidebar-empty">Sources you add will appear here.</p>}
@@ -292,13 +313,15 @@ export default function App(){
         </div>
       </header>
       {error&&<div className="global-error" role="alert">{error}</div>}
-      {view==="chat"?<ChatView messages={messages} busy={busy} activeJobs={activeJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} send={sendMessage} addSource={()=>setAddOpen(true)} courseSelected={courseId!==undefined}/>:view==="learn"?<LearnView courseId={courseId}/>:view==="plan"?<StudyPlanView courseId={courseId} refreshKey={planRefreshKey} regenerateKey={planRegenerateKey} addSource={()=>setAddOpen(true)}/>:<LibraryView aiReady={health?.llm===true} sources={sources} courses={courses} jobs={currentJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} refresh={refresh} addSource={()=>setAddOpen(true)}/>}
+      {view==="chat"?<ChatView messages={messages} busy={busy} activeJobs={activeJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} send={sendMessage} addSource={()=>setAddOpen(true)} courseSelected={courseId!==undefined} openPlan={()=>setView("plan")}/>:view==="learn"?<LearnView courseId={courseId} sourceCount={sources.length} readyCount={sources.filter(source=>source.status==="done").length} openLibrary={()=>setView("library")} aiReady={health?.llm===true} addSource={()=>setAddOpen(true)} openPlan={()=>setView("plan")}/>:view==="plan"?<StudyPlanView courseId={courseId} courseName={courses.find(course=>course.id===courseId)?.name} sources={sources} sourcesLoaded={health!==undefined&&sourcesFor===(courseId===undefined?"all":String(courseId))} aiReady={health?.llm===true} refreshKey={planRefreshKey} regenerateKey={planRegenerateKey} rebuild={()=>setPlanRegenerateKey(key=>key+1)} addSource={()=>setAddOpen(true)} openLibrary={()=>setView("library")}/>:<LibraryView aiReady={health?.llm===true} courseName={courses.find(course=>course.id===courseId)?.name} sources={sources} courses={courses} jobs={currentJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} refresh={refresh} addSource={()=>setAddOpen(true)}/>}
     </main>
     {addOpen&&<AddSourceDialog courseId={courseId} courses={courses} close={()=>setAddOpen(false)} refresh={refresh}/>}
   </div>
 }
 
-function StudyPlanView({courseId,refreshKey,regenerateKey,addSource}:{courseId?:number;refreshKey:number;regenerateKey:number;addSource:()=>void}){
+// The study plan page shows one thing to do at a time: add material, wait while LearnOS prepares it, fix a source
+// that needs attention, or study: copy the session for an AI tutor, then mark it done and go on.
+function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refreshKey,regenerateKey,rebuild,addSource,openLibrary}:{courseId?:number;courseName?:string;sources:Source[];sourcesLoaded:boolean;aiReady:boolean;refreshKey:number;regenerateKey:number;rebuild:()=>void;addSource:()=>void;openLibrary:()=>void}){
   const handledRegenerate=useRef(regenerateKey)
   const[syllabus,setSyllabus]=useState("")
   const[planWarnings,setPlanWarnings]=useState<string[]>([])
@@ -306,10 +329,11 @@ function StudyPlanView({courseId,refreshKey,regenerateKey,addSource}:{courseId?:
   const[topic,setTopic]=useState("")
   const[topicId,setTopicId]=useState<string>()
   const[planNodes,setPlanNodes]=useState<OutlineTopic[]>([])
-  const[tutor,setTutor]=useState("general")
+  const[tutor,setTutorState]=useState(()=>remembered("learnos.tutor",["general","chatgpt","gemini","claude"],"general"))
+  const setTutor=(value:string)=>{setTutorState(value);remember("learnos.tutor",value)}
   const[maxInputTokens,setMaxInputTokens]=useState(6000)
   const[pack,setPack]=useState<StudyPackExport|null>(null)
-  const[expandedOutline,setExpandedOutline]=useState<string|null>(null)
+  const[partlyIds,setPartlyIds]=useState<Set<string>>(new Set())
   const[completedTopics,setCompletedTopics]=useState<Set<string>>(new Set())
   const[busy,setBusy]=useState(false)
   const[error,setError]=useState("")
@@ -318,44 +342,56 @@ function StudyPlanView({courseId,refreshKey,regenerateKey,addSource}:{courseId?:
   const[generatedAt,setGeneratedAt]=useState<string|null>(null)
   const[completedIds,setCompletedIds]=useState<Set<string>>(new Set())
   const[pollTick,setPollTick]=useState(0)
-  const[sessionSize,setSessionSize]=useState<SessionSize>("standard")
+  const[reloadKey,setReloadKey]=useState(0)
+  const[loadedFor,setLoadedFor]=useState<string|null>(null)  // the space whose plan is shown: nothing is judged before it loads
+  const[sessionSize,setSessionSizeState]=useState<SessionSize>(()=>remembered("learnos.session-size",["compact","standard","large","xl"],"standard") as SessionSize)
+  const setSessionSize=(value:SessionSize)=>{setSessionSizeState(value);remember("learnos.session-size",value)}
+  const[partlyBudgets,setPartlyBudgets]=useState<Record<string,number>>({})
   // The open plan topic, then each part opened inside it; the last entry is shown.
   const[unitTrail,setUnitTrail]=useState<PreparedTopic[]>([])
   const[unitBusy,setUnitBusy]=useState(false)
   const[unitError,setUnitError]=useState("")
   const unitRequest=useRef(0)
   const unitTarget=useRef<{nodeId:string;trail:PreparedTopic[]}|null>(null)
+  const doneIds=useRef(completedIds);doneIds.current=completedIds
   const[packError,setPackError]=useState("")
   const[masterPrompt,setMasterPrompt]=useState<MasterPrompt|null>(null)
   const[masterError,setMasterError]=useState("")
-  const[masterPath,setMasterPath]=useState("")
   const[masterTick,setMasterTick]=useState(0)  // a saved tick: the master prompt is read again after the save, not before
   const activeCourse=useRef(courseId)
-  const applyPlan=(plan:Awaited<ReturnType<typeof api.syllabus>>,progress:Awaited<ReturnType<typeof api.studyProgress>>)=>{
+  const scopeKey=courseId===undefined?"all":String(courseId)
+  const applyPlan=(plan:Awaited<ReturnType<typeof api.syllabus>>,progress:Awaited<ReturnType<typeof api.studyProgress>>,requested:number|undefined)=>{
     setSyllabus(plan.syllabus||"");setPlanWarnings(plan.warnings||[]);setRelationshipInfo(normalizePlanRelationships(plan.source_relationships))
     setPlanStatus(plan.status||"ready");setPlanError(plan.error||"");setGeneratedAt(plan.generated_at||null)
     setPlanNodes((plan.nodes||[]).map(node=>({id:node.id,parentId:node.parent_id||"",pathId:node.path_id||"main",kind:node.type,topic:node.title,purpose:node.metadata?.purpose||"",prerequisites:node.metadata?.prerequisites||"",groups:Array.isArray(node.metadata?.source_groups)?node.metadata.source_groups:String(node.metadata?.source_groups||"").split(",").map(s=>s.trim()).filter(Boolean),why:node.metadata?.why_included||"",enables:node.metadata?.enables||"",sourceIds:Array.isArray(node.metadata?.source_ids)?node.metadata.source_ids:[],sourceRoles:Array.isArray(node.metadata?.source_roles)?node.metadata.source_roles:[],confidence:node.metadata?.topic_merge_confidence||0})))
     applyProgress(progress)
+    setLoadedFor(requested===undefined?"all":String(requested))
   }
-  const applyProgress=(progress:Awaited<ReturnType<typeof api.studyProgress>>)=>{setCompletedTopics(new Set((progress.completed_legacy_topics??progress.completed_topics).map(normalizedTopic)));setCompletedIds(new Set(progress.completed_topic_ids||[]))}
-  useEffect(()=>{let current=true;const regenerate=regenerateKey!==handledRegenerate.current;handledRegenerate.current=regenerateKey;if(activeCourse.current!==courseId||regenerate){unitRequest.current+=1;setUnitTrail([]);setUnitBusy(false);setUnitError("")}if(activeCourse.current!==courseId){setPlanNodes([]);setPlanStatus("ready");setPlanError("");setGeneratedAt(null);setCompletedIds(new Set());setCompletedTopics(new Set());setExpandedOutline(null);setMasterPrompt(null);setMasterPath("")}activeCourse.current=courseId;setSyllabus("");setPlanWarnings([]);setRelationshipInfo({sources:[],cross_paths:[],shared_foundations:[]});setPack(null);setTopicId(undefined);setTopic("");setPackError("");setBusy(true);setError("");Promise.all([api.syllabus(courseId,regenerate),api.studyProgress(courseId)]).then(([plan,progress])=>{if(current)applyPlan(plan,progress)}).catch(e=>{if(current)setError(e instanceof Error?e.message:"Could not load your study plan")}).finally(()=>{if(current)setBusy(false)});return()=>{current=false}},[courseId,refreshKey,regenerateKey])
+  const applyProgress=(progress:Awaited<ReturnType<typeof api.studyProgress>>)=>{setCompletedTopics(new Set((progress.completed_legacy_topics??progress.completed_topics).map(normalizedTopic)));setCompletedIds(new Set(progress.completed_topic_ids||[]));setPartlyIds(new Set(progress.partly_done_topic_ids||[]));setPartlyBudgets(progress.partly_done_budgets||{})}
+  useEffect(()=>{let current=true;const regenerate=regenerateKey!==handledRegenerate.current;handledRegenerate.current=regenerateKey;if(activeCourse.current!==courseId||regenerate){unitRequest.current+=1;setUnitTrail([]);setUnitBusy(false);setUnitError("")}if(activeCourse.current!==courseId){setPlanNodes([]);setPlanStatus("ready");setPlanError("");setGeneratedAt(null);setCompletedIds(new Set());setCompletedTopics(new Set());setPartlyIds(new Set());setMasterPrompt(null);setLoadedFor(null)}activeCourse.current=courseId;setPack(null);setTopicId(undefined);setTopic("");setPackError("");setBusy(true);setError("");const requested=courseId;Promise.all([api.syllabus(requested,regenerate),api.studyProgress(requested)]).then(([plan,progress])=>{if(current)applyPlan(plan,progress,requested)}).catch(e=>{if(current)setError(e instanceof Error?e.message:"Could not load your study plan")}).finally(()=>{if(current)setBusy(false)});return()=>{current=false}},[courseId,refreshKey,regenerateKey,reloadKey])
   const progressKey=[...completedIds].sort().join("|")+"#"+[...completedTopics].sort().join("|")
-  useEffect(()=>{if(!planNodes.length){setMasterPrompt(null);return}let current=true;const requested=courseId;api.masterPrompt(requested,tutor,masterPath||undefined).then(result=>{if(current&&activeCourse.current===requested){setMasterPrompt(result);setMasterError("")}}).catch(e=>{if(!current)return;if((e as {status?:number}).status===404&&masterPath){setMasterPath("");return}setMasterError(e instanceof Error?e.message:"Could not prepare the master prompt")});return()=>{current=false}},[courseId,tutor,masterPath,generatedAt,planNodes.length,progressKey,masterTick])
+  useEffect(()=>{if(!planNodes.length){setMasterPrompt(null);return}let current=true;const requested=courseId;api.masterPrompt(requested,tutor).then(result=>{if(current&&activeCourse.current===requested){setMasterPrompt(result);setMasterError("")}}).catch(e=>{if(current)setMasterError(e instanceof Error?e.message:"Could not prepare the master prompt")});return()=>{current=false}},[courseId,tutor,generatedAt,planNodes.length,progressKey,masterTick])
   // While a plan is being built in the background, check again every few seconds; reading never builds.
-  useEffect(()=>{if(planStatus!=="updating")return;const requested=courseId;const timer=window.setTimeout(()=>{Promise.all([api.syllabus(requested),api.studyProgress(requested)]).then(([plan,progress])=>{if(activeCourse.current===requested){applyPlan(plan,progress);setPollTick(tick=>tick+1)}}).catch(()=>{if(activeCourse.current===requested)setPollTick(tick=>tick+1)})},4000);return()=>window.clearTimeout(timer)},[planStatus,pollTick,courseId])
+  useEffect(()=>{if(planStatus!=="updating"&&planStatus!=="outdated")return;const requested=courseId;const timer=window.setTimeout(()=>{Promise.all([api.syllabus(requested),api.studyProgress(requested)]).then(([plan,progress])=>{if(activeCourse.current===requested){applyPlan(plan,progress,requested);setPollTick(tick=>tick+1)}}).catch(()=>{if(activeCourse.current===requested)setPollTick(tick=>tick+1)})},4000);return()=>window.clearTimeout(timer)},[planStatus,pollTick,courseId])
   const makePack=async(event:FormEvent)=>{event.preventDefault();if(!topic.trim())return;setBusy(true);setPackError("");try{const result=await api.exportStudyPack(topic.trim(),courseId,tutor,maxInputTokens,topicId);setPack(result)}catch(e){setPackError(e instanceof Error?e.message:"Could not prepare study pack")}finally{setBusy(false)}}
   // Opens a plan topic (trail empty) or a part of the last topic in `trail`. retry=false only shows it again.
-  const openUnit=async(nodeId:string,trail:PreparedTopic[],options:{size?:SessionSize;tutor?:string;retry?:boolean}={})=>{
+  // A topic too large for one session opens at its first unfinished part, unless its list of parts was asked for.
+  const openUnit=async(nodeId:string,trail:PreparedTopic[],options:{size?:SessionSize;tutor?:string;retry?:boolean;showParts?:boolean}={})=>{
     const size=options.size??sessionSize,tutorName=options.tutor??tutor
     if(unitBusy&&unitTarget.current?.nodeId===nodeId&&!options.size&&!options.tutor)return  // a second click on what is loading
     const request=++unitRequest.current;const requested=courseId;unitTarget.current={nodeId,trail};setUnitBusy(true);setUnitError("")
-    try{const result=await api.prepareTopic(nodeId,requested,size,tutorName,options.retry??true);if(request===unitRequest.current&&activeCourse.current===requested)setUnitTrail([...trail,result])}
-    catch(e){
+    try{
+      const result=await api.prepareTopic(nodeId,requested,size,tutorName,options.retry??true)
+      if(request!==unitRequest.current||activeCourse.current!==requested)return
+      const nextTrail=[...trail,result];setUnitTrail(nextTrail)
+      const firstOpen=result.status==="split"&&!options.showParts?(result.children||[]).find(part=>!doneIds.current.has(part.id)):undefined
+      if(firstOpen)void openUnit(firstOpen.id,nextTrail,{size,tutor:tutorName,retry:options.retry})
+    }catch(e){
       if(request!==unitRequest.current)return
       const status=(e as {status?:number}).status
-      if(trail.length&&(status===404||status===409)){void openUnit(trail[0].node_id,[],{size,tutor:tutorName});setUnitError("The study plan changed since these parts were made, so the topic is prepared again.");return}
+      if(trail.length&&(status===404||status===409)){void openUnit(trail[0].node_id,[],{size,tutor:tutorName});setUnitError("Your study plan changed, so this topic was prepared again.");return}
       if(status===404)setUnitTrail([])
-      setUnitError(status===404?"This topic is no longer in your study plan. Choose a topic in the outline above.":e instanceof Error?e.message:"Could not prepare this topic")
+      setUnitError(status===404?"This topic is no longer in your study plan.":e instanceof Error?e.message:"Could not prepare this topic")
     }finally{if(request===unitRequest.current)setUnitBusy(false)}}
   const currentUnit=unitTrail.length?unitTrail[unitTrail.length-1]:null
   const pendingUnit=unitBusy?unitTarget.current:null
@@ -369,71 +405,153 @@ function StudyPlanView({courseId,refreshKey,regenerateKey,addSource}:{courseId?:
   const markDone=async(id:string,title:string,completed:boolean,showError:(message:string)=>void=setUnitError)=>{const isPlanTopic=planNodes.some(node=>node.id===id);const next=new Set(completedTopics);const nextIds=new Set(completedIds);if(completed){nextIds.add(id)}else{if(isPlanTopic)next.delete(normalizedTopic(title));nextIds.delete(id)}setCompletedTopics(next);setCompletedIds(nextIds);const requested=courseId;try{await api.updateStudyProgress(title,requested,completed,id)}catch(e){setCompletedTopics(completedTopics);setCompletedIds(completedIds);showError(e instanceof Error?e.message:"Could not save your progress");return false}
     // Finishing the last part of a topic finishes the topic too (and un-ticking a part re-opens it): read it back.
     setMasterTick(tick=>tick+1);api.studyProgress(requested).then(progress=>{if(activeCourse.current===requested)applyProgress(progress)}).catch(()=>{});return true}
+  const scrollToStudy=()=>window.setTimeout(()=>document.getElementById("study-card")?.scrollIntoView({behavior:"smooth",block:"start"}),0)
   // The next unit shares the open trail down to its own depth: a sibling part keeps the parent, the next topic starts fresh.
-  const openNext=(next:{id:string;depth:number})=>{void openUnit(next.id,unitTrail.slice(0,next.depth));window.setTimeout(()=>document.getElementById("study-pack-form")?.scrollIntoView({behavior:"smooth",block:"start"}),0)}
+  const sizeFor=(id:string):SessionSize|undefined=>{const name=Object.entries(SIZE_TOKENS).find(([,tokens])=>tokens===partlyBudgets[id])?.[0] as SessionSize|undefined;return name&&name!==sessionSize?name:undefined}
+  const openTopic=(id:string)=>{const size=sizeFor(id);if(size)setSessionSize(size);void openUnit(id,[],size?{size}:{})}
+  const openNext=(next:{id:string;depth:number})=>{if(next.depth===0)openTopic(next.id);else void openUnit(next.id,unitTrail.slice(0,next.depth));scrollToStudy()}
   const doneAndNext=async()=>{if(!currentUnit)return;const course=courseId,request=unitRequest.current
     if(!unitDone&&!(await markDone(currentUnit.node_id,currentUnit.title,true)))return
     if(activeCourse.current!==course||unitRequest.current!==request)return  // the learner moved on while it was saving
     if(currentUnit.next)openNext(currentUnit.next)}
   const toggleComplete=(item:OutlineTopic,completed:boolean)=>markDone(item.id,item.topic,completed,setError)
   const unitDone=currentUnit?completedIds.has(currentUnit.node_id)||(currentUnit.depth===0&&completedTopics.has(normalizedTopic(currentUnit.title))):false
-  const selectTopic=(item:OutlineTopic)=>{if(item.kind==="outline"){setExpandedOutline(expandedOutline===item.id?null:item.id);return}setTopic(item.topic);setTopicId(item.id);setPack(null);void openUnit(item.id,[]);window.setTimeout(()=>document.getElementById("study-pack-form")?.scrollIntoView({behavior:"smooth",block:"start"}),0)}
-  const hasPlan=planStatus!=="empty"&&(planNodes.length>0||Boolean(syllabus&&!syllabus.startsWith("No ")))
+  const selectTopic=(item:OutlineTopic)=>{setTopic(item.topic);setTopicId(item.id);setPack(null);openTopic(item.id);scrollToStudy()}
   const builtAt=generatedAt?new Date(generatedAt.endsWith("Z")||generatedAt.includes("+")?generatedAt:generatedAt+"Z").toLocaleString():""
-  const statusLine=planStatus==="updating"?"Updating in the background with your latest sources. The last version is shown until it is ready.":planStatus==="failed"?planError:planStatus==="outdated"?"Your sources changed since this plan was built. An update will start shortly.":builtAt?`Up to date · built ${builtAt}`:"Up to date"
-  const topicsByGroup=new Map<string,{title:string;items:OutlineTopic[]}>()
-  outline.forEach(item=>{const current=topicsByGroup.get(item.pathId)||{title:item.pathId,items:[]};if(!item.parentId)current.title=item.topic;current.items.push(item);topicsByGroup.set(item.pathId,current)})
+  const statusLine=planStatus==="updating"?"Updating with your latest material. You can keep studying meanwhile.":planStatus==="failed"?planError:planStatus==="outdated"?"Your material changed; the plan updates by itself shortly.":builtAt?`Up to date · built ${builtAt}`:"Up to date"
+  // What the page is about right now.
+  const studyItems=outline.filter(item=>item.kind==="study")
+  const studiedCount=studyItems.filter(isDone).length
+  const readyCount=sources.filter(source=>source.status==="done").length
+  const needsInputCount=sources.filter(source=>source.status==="needs_input").length
+  const attentionCount=needsInputCount+sources.filter(source=>source.status==="failed").length
+  const processingCount=sources.length-readyCount-attentionCount
+  const loaded=loadedFor===scopeKey
+  const stage=!loaded?(error?"error":"loading"):!studyItems.length&&!sourcesLoaded?"loading"
+    :studyItems.length?"ready"
+    :!sources.length?"empty"
+    :!readyCount&&attentionCount&&!processingCount?"attention"
+    :planStatus==="failed"?"failed"
+    :processingCount||!readyCount||planStatus==="updating"||planStatus==="outdated"?"preparing"
+    :!aiReady?"no-ai":"no-topics"
+  // The next topic: from the plan's reading order once known, else the first unstudied topic.
+  const nextTopic=masterPrompt?masterPrompt.next_topic:(()=>{const item=studyItems.find(entry=>!isDone(entry));return item?{id:item.id,title:item.topic,partly_done:partlyIds.has(item.id)}:null})()
+  const nextNode=nextTopic?outline.find(item=>item.id===nextTopic.id):undefined
+  const started=Boolean(masterPrompt?.started||studiedCount)
+  const firstOpenPart=currentUnit?.status==="split"?(currentUnit.children||[]).find(part=>!completedIds.has(part.id)):undefined
+  const nextLabel=currentUnit?.next?(currentUnit.next.depth>0?"Done · next part":"Done · next topic"):""
+  // At the end of a learning path the plan may still have topics elsewhere (another path, or one skipped).
+  const planNext=nextTopic&&nextTopic.id!==unitTrail[0]?.node_id?nextTopic:null
+  const finishAndGo=async()=>{if(!currentUnit||!planNext)return;const course=courseId;if(!unitDone&&!(await markDone(currentUnit.node_id,currentUnit.title,true)))return;if(activeCourse.current===course)openNext({id:planNext.id,depth:0})}
+  const message=(title:string,text:ReactNode,actions?:ReactNode,spinner=false)=><div className="plan-message"><h2>{spinner&&<LoaderCircle size={17} className="learn-spin"/>}{title}</h2><p>{text}</p>{actions&&<div className="plan-actions">{actions}</div>}</div>
   return <section className="plan-view">
-    <div className="plan-intro"><p className="eyebrow">Learn from your own sources</p><h2>Start with a course. Follow its outline.</h2><p>Add one or more sources and put them in a course. LearnOS turns them into a topic outline. Pick a topic to get a short, cited text pack that you can study here or paste into an AI tutor.</p></div>
-    {!hasPlan&&planStatus==="updating"?<div className="plan-empty"><h3><LoaderCircle size={15} className="learn-spin"/> Building your study plan in the background…</h3><p>LearnOS is turning your sources into an outline. The first plan for a space can take a few minutes; later updates only process what changed. You can keep working, and this page updates when it is ready.</p></div>:!hasPlan&&planStatus==="failed"?<div className="plan-empty"><h3>The study plan could not be built</h3><p className="plan-error" role="alert">{planError}</p></div>:!hasPlan?<div className="plan-empty"><h3>{busy?"Loading your study plan…":"Start here: add your learning material"}</h3><p>Choose or create a study space, add sources, and LearnOS will organize them and prepare the outline automatically. You can leave this page while processing continues.</p><div className="plan-actions"><Button onClick={addSource}><Plus size={16}/>Add sources</Button></div>{error&&<p className="plan-error" role="alert">{error}</p>}{syllabus&&<p className="plan-error">{syllabus}</p>}</div>:<>
-      <div className="plan-section"><div className="plan-section-heading"><div><span className="step-number">1</span><div><h3>Course outline</h3><span className="plan-help">Broad topics open their own outline. Choose a leaf topic to prepare its study pack.</span></div></div><div className="plan-actions"><CopyAnswer text={syllabus}/></div></div>
+    {stage==="loading"?message("Loading your study plan…","",undefined,true)
+    :stage==="error"?message("Your study plan could not be loaded",error,<Button variant="outline" onClick={()=>setReloadKey(key=>key+1)}><RefreshCw size={14}/>Try again</Button>)
+    :stage==="empty"?message(courseName?`Add material to ${courseName}`:"Add your learning material","YouTube videos or playlists, PDFs, slides, documents or your own notes. LearnOS reads them, builds your study plan and prepares each study session for you.",<Button onClick={addSource}><Plus size={16}/>Add material</Button>)
+    :stage==="attention"?message("Your material needs your attention",needsInputCount===attentionCount?`${plural(attentionCount,"source")} had no text LearnOS could read, for example a video without captions. You can paste its text or transcript in the Library.`:`Processing stopped for ${plural(attentionCount,"source")}. In the Library you can resume it, or paste its text.`,<><Button onClick={openLibrary}>Open the Library</Button><Button variant="ghost" onClick={addSource}><Plus size={14}/>Add other material</Button></>)
+    :stage==="preparing"?message("Preparing your study plan",<>LearnOS is reading your material and building the plan{processingCount?` (${plural(processingCount,"source")} still being read)`:""}. This page updates by itself; you can leave and come back.</>,undefined,true)
+    :stage==="failed"?message("The study plan could not be built",planError||"The AI service did not answer.",<Button variant="outline" onClick={rebuild}><RefreshCw size={14}/>Try again</Button>)
+    :stage==="no-ai"?message("Study plans need an AI model","LearnOS needs a Gemini API key to find the topics in your material. Add GEMINI_API_KEY to the .env file and restart LearnOS; your material is kept.")
+    :stage==="no-topics"?message("No topics found yet","LearnOS could not find study topics in this material yet. This is usually a temporary problem with the AI service.",<Button variant="outline" onClick={rebuild}><RefreshCw size={14}/>Try again</Button>)
+    :<>
+      {attentionCount>0&&<p className="plan-warning" role="status">{plural(attentionCount,"source")} could not be read and {attentionCount===1?"is":"are"} not in this plan yet. <button className="link-button" onClick={openLibrary}>Fix it in the Library</button></p>}
+      <div className="plan-section study-card" id="study-card">
+        <div className="study-progress"><span>{courseName||"All sources"} · {studiedCount} of {plural(studyItems.length,"topic")} studied</span><progress className="plan-progress" max={studyItems.length} value={studiedCount} aria-label="Topics studied"/></div>
+        {unitError&&<p className="plan-error" role="alert">{unitError}</p>}
+        {unitBusy?<div className="study-busy" role="status"><LoaderCircle size={16} className="learn-spin"/>Preparing your study session…</div>
+        :currentUnit&&currentUnit.status!=="split"?<>
+          {unitTrail.length>1&&<nav className="unit-trail" aria-label="Topic and its parts">{unitTrail.map((entry,index)=>index<unitTrail.length-1?<span key={entry.node_id}><button type="button" className="link-button" onClick={()=>void openUnit(entry.node_id,unitTrail.slice(0,index),{retry:false,showParts:true})}>{entry.title}</button><span aria-hidden="true"> › </span></span>:<strong key={entry.node_id}>{entry.title}</strong>)}</nav>}
+          <p className="eyebrow">{unitDone?"Studied":"Now studying"}</p>
+          <h2 className="study-title">{currentUnit.title}</h2>
+          {currentUnit.purpose&&<p className="plan-help">{currentUnit.purpose}</p>}
+          {currentUnit.warning&&<p className="plan-warning" role="status">{currentUnit.warning}</p>}
+          {currentUnit.note&&<p className="plan-warning" role="status">{currentUnit.note}</p>}
+          <div className="study-actions"><CopyAnswer text={currentUnit.study_text||""} label="Copy for your AI tutor" primary/>{currentUnit.next?<Button onClick={()=>void doneAndNext()}>{unitDone?(nextLabel.replace("Done · ","Go to ")):nextLabel}</Button>:planNext?<Button onClick={()=>void finishAndGo()}>{unitDone?"Next":"Done · next"}: {planNext.title}</Button>:<Button variant="outline" disabled={unitDone} onClick={()=>void markDone(currentUnit.node_id,currentUnit.title,true)}>{unitDone?"Studied":"Mark as studied"}</Button>}</div>
+          <p className="plan-help">Paste it into ChatGPT, Claude or Gemini and study there. When you finish, write “unit done” in that chat for a recap and review questions.{currentUnit.next?` Next: ${currentUnit.next.title}.`:planNext?"":unitDone?" You have studied every topic in this plan.":currentUnit.depth?" This is the last part of this learning path.":" This is the last topic of this learning path."}</p>
+          <div className="study-secondary"><Button variant="ghost" onClick={()=>downloadText(`${fileSlug(currentUnit.title)}.md`,currentUnit.study_text||"")}><Download size={14}/>Download</Button>{unitDone&&<button className="text-link" onClick={()=>void markDone(currentUnit.node_id,currentUnit.title,false)}>Mark as not studied</button>}</div>
+          <details className="outline-markdown"><summary>Preview what is copied (about {(currentUnit.estimated_tokens||0).toLocaleString()} tokens, {plural((currentUnit.sources||[]).length,"passage")} from your material)</summary><div className="plan-syllabus"><MarkdownText text={currentUnit.study_text||""}/></div></details>
+        </>
+        :currentUnit?<>
+          <p className="eyebrow">A topic in parts</p>
+          <h2 className="study-title">{currentUnit.title}</h2>
+          <p className="plan-help">{currentUnit.reason} Each part is one study session.</p>
+          <div className="outline-topic-list unit-parts">{(currentUnit.children||[]).map(part=>{const done=completedIds.has(part.id);return <article className={`outline-topic${done?" completed":""}`} key={part.id}><label className="outline-check"><input type="checkbox" checked={done} onChange={event=>void markDone(part.id,part.title,event.target.checked)} aria-label={`Mark ${part.title} ${done?"not studied":"studied"}`}/><span>{done?<Check size={13}/>:null}</span></label><button className="outline-topic-button" onClick={()=>void openUnit(part.id,unitTrail)}><strong>{part.title}</strong>{part.purpose&&<small>{part.purpose}</small>}</button></article>})}</div>
+          <div className="study-actions">{firstOpenPart?<Button onClick={()=>void openUnit(firstOpenPart.id,unitTrail)}>Continue with: {firstOpenPart.title}</Button>:currentUnit.next?<Button onClick={()=>openNext(currentUnit.next!)}>Next: {currentUnit.next.title}</Button>:planNext?<Button onClick={()=>openNext({id:planNext.id,depth:0})}>Next: {planNext.title}</Button>:<span className="plan-help">All parts studied. You have studied every topic in this plan.</span>}</div>
+        </>
+        :nextTopic?<>
+          <p className="eyebrow">{started?"Up next":"Start here"}</p>
+          <h2 className="study-title">{nextTopic.title}{nextTopic.partly_done?<span className="tree-badge partly">Partly done</span>:null}</h2>
+          {nextNode?.purpose&&<p className="plan-help">{nextNode.purpose}</p>}
+          <div className="study-actions"><Button onClick={()=>openNext({id:nextTopic.id,depth:0})}>{started?"Continue studying":"Start studying"}</Button></div>
+          <p className="plan-help">LearnOS prepares the study session for you. You copy it into your AI tutor and study.</p>
+        </>
+        :<><p className="eyebrow">All done</p><h2 className="study-title">You have studied every topic</h2><p className="plan-help">Choose any topic below to review it, or add more material.</p></>}
+        <div className="session-settings"><label>Session length<select value={sessionSize} onChange={event=>changeSize(event.target.value as SessionSize)}><option value="compact">Short (about 4k tokens)</option><option value="standard">Standard (about 8k tokens)</option><option value="large">Long (about 16k tokens)</option><option value="xl">Very long (about 32k tokens)</option></select></label><label>Written for<select value={tutor} onChange={event=>changeTutor(event.target.value)}><option value="general">Any AI tutor</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="claude">Claude</option></select></label></div>
+      </div>
+      <div className="plan-section" id="plan-outline"><div className="plan-section-heading"><div><h3>Your study plan</h3><span className="plan-help">Choose any topic to study it. Groups open and close.</span></div></div>
         <p className={`plan-status ${planStatus}`} role="status">{planStatus==="updating"&&<LoaderCircle size={13} className="learn-spin"/>}{statusLine}</p>
         {error&&<p className="plan-error" role="alert">{error}</p>}
-        {planWarnings.length>0&&<div className="plan-warning" role="status"><strong>This plan is incomplete.</strong><ul>{planWarnings.map((warning,index)=><li key={index}>{warning}</li>)}</ul><span>This is usually a temporary problem with the AI service. Press Refresh (top right) to try again.</span></div>}
-        {(relationshipInfo.sources.length>0||relationshipInfo.shared_foundations.length>0)&&<details className="outline-markdown"><summary>How LearnOS grouped these sources</summary><div className="plan-help">Source identity is inferred and may be uncertain. Shared topics alone do not establish that sources belong to one course.</div>{relationshipInfo.sources.map((r:any,index:number)=><p key={`${r.source_a_id}-${r.source_b_id}-${index}`}>Source {r.source_a_id} + source {r.source_b_id}: <strong>{String(r.relation_type||"").replaceAll("_"," ")}</strong> ({Math.round(Number(r.confidence||0)*100)}% confidence). {r.rationale}</p>)}{relationshipInfo.shared_foundations.length>0&&<p>Shared foundations: {relationshipInfo.shared_foundations.join(", ")}</p>}</details>}
-        <div className="outline-tree">{[...topicsByGroup.entries()].map(([group,path])=>{const done=path.items.filter(item=>item.kind==="study"&&isDone(item)).length;return <details className="outline-group" key={group} open><summary><span>{path.title}</span><small>{done} topics complete</small></summary><div className="outline-topic-list">{path.items.filter(item=>!item.parentId||item.parentId.toLowerCase()==="none").map(item=>{const done=isDone(item);return <article className={`outline-topic${done?" completed":""}`} key={`${group}-${item.id}`}>
-          {item.kind==="study"&&<label className="outline-check"><input type="checkbox" checked={done} onChange={event=>void toggleComplete(item,event.target.checked)} aria-label={`Mark ${item.topic} ${done?"not complete":"complete"}`}/><span>{done?<Check size={13}/>:null}</span></label>}
-          <button className="outline-topic-button" onClick={()=>selectTopic(item)}><strong>{item.topic}</strong><small>{item.kind==="outline"?"Learning path or topic outline · open subtopics":item.purpose}</small>{item.why&&<em>Why included: {item.why}</em>}{item.enables&&<em>Enables: {item.enables}</em>}{item.sourceRoles.length>0&&<em>Source roles: {item.sourceRoles.join(", ")}</em>}{item.prerequisites&&item.prerequisites!=="None recorded"&&item.prerequisites.toLowerCase()!=="none"&&<em>Prerequisites: {item.prerequisites} · confidence {Math.round(item.confidence*100)}%</em>}</button>
-        </article>})}</div></details>})}</div>
-        {expandedOutline&&outline.some(item=>item.id===expandedOutline)&&<div className="plan-suboutline"><div className="plan-section-heading"><div><h3>{outline.find(item=>item.id===expandedOutline)?.topic}</h3><span className="plan-help">Study these focused topics one at a time.</span></div><Button variant="ghost" onClick={()=>setExpandedOutline(null)}>Close outline</Button></div><div className="outline-topic-list">{outline.filter(item=>item.parentId===expandedOutline).map(item=><article className={`outline-topic${isDone(item)?" completed":""}`} key={item.id}>{item.kind==="study"&&<label className="outline-check"><input type="checkbox" checked={isDone(item)} onChange={event=>void toggleComplete(item,event.target.checked)} aria-label={`Mark ${item.topic} ${isDone(item)?"not complete":"complete"}`}/><span>{isDone(item)?<Check size={13}/>:null}</span></label>}<button className="outline-topic-button" onClick={()=>selectTopic(item)}><strong>{item.topic}</strong><small>{item.kind==="outline"?"Open sub-outline":item.purpose}</small></button></article>)}</div></div>}
-        <details className="outline-markdown"><summary>View / copy the full syllabus text</summary><div className="plan-syllabus"><MarkdownText text={syllabus}/></div></details>
+        {planWarnings.length>0&&<div className="plan-warning" role="status"><strong>Part of this plan is missing.</strong><ul>{planWarnings.map((warning,index)=><li key={index}>{warning}</li>)}</ul><span>This is usually a temporary problem with the AI service. <button className="link-button" onClick={rebuild}>Try again</button></span></div>}
+        <OutlineTree nodes={outline} isDone={isDone} partly={partlyIds} nextId={nextTopic?.id} open={selectTopic} toggle={(item,completed)=>void toggleComplete(item,completed)}/>
+        {(relationshipInfo.sources.length>0||relationshipInfo.shared_foundations.length>0)&&<details className="outline-markdown"><summary>How LearnOS grouped your sources</summary><div className="plan-help">Source identity is inferred and may be uncertain. Shared topics alone do not establish that sources belong to one course.</div>{relationshipInfo.sources.map((r:any,index:number)=><p key={`${r.source_a_id}-${r.source_b_id}-${index}`}>Source {r.source_a_id} + source {r.source_b_id}: <strong>{String(r.relation_type||"").replaceAll("_"," ")}</strong> ({Math.round(Number(r.confidence||0)*100)}% confidence). {r.rationale}</p>)}{relationshipInfo.shared_foundations.length>0&&<p>Shared foundations: {relationshipInfo.shared_foundations.join(", ")}</p>}</details>}
+        <details className="outline-markdown"><summary>The whole plan as text</summary><div className="plan-actions"><CopyAnswer text={syllabus}/></div><div className="plan-syllabus"><MarkdownText text={syllabus}/></div></details>
       </div>
-      <div className="plan-section" id="tutor-setup"><div className="plan-section-heading"><div><span className="step-number">2</span><div><h3>Set up your AI tutor</h3><span className="plan-help">Give your tutor the whole plan first. Then study one unit at a time.</span></div></div>{masterPrompt&&<div className="plan-actions"><CopyAnswer text={masterPrompt.text}/><Button variant="ghost" onClick={()=>downloadText(`${fileSlug(`master prompt ${masterPrompt.paths.find(path=>path.id===masterPath)?.title||"study plan"}`)}.md`,masterPrompt.text)}><Download size={14}/>Download .md</Button></div>}</div>
-        <div className="unit-settings"><label className="field-label">AI tutor<select className="text-input" value={tutor} onChange={event=>changeTutor(event.target.value)}><option value="general">Any AI tutor</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="claude">Claude</option></select></label>{(masterPrompt?.paths.length||0)>1&&<label className="field-label">Learning path<select className="text-input" value={masterPath} onChange={event=>setMasterPath(event.target.value)}><option value="">All paths</option>{masterPrompt?.paths.map(path=><option key={path.id} value={path.id}>{path.title}</option>)}</select></label>}</div>
+      <details className="plan-section optional-section"><summary><strong>Using a ChatGPT or Claude Project, or a Gemini Gem?</strong><span>Optional. Each study session already works on its own; this gives your tutor the whole plan once.</span></summary>
         {masterError&&<p className="plan-error" role="alert">{masterError}</p>}
-        {masterPrompt&&<><p className="plan-help">{TUTOR_SETUP[tutor]||TUTOR_SETUP.general} The master prompt is about {masterPrompt.estimated_tokens.toLocaleString()} tokens ({masterPrompt.characters.toLocaleString()} characters){masterPrompt.detailed?"":", with topic titles only to keep it short,"} and includes your progress ({masterPrompt.completed} of {plural(masterPrompt.topics,"topic")} studied), so copy it again later to bring your tutor up to date.</p>
-        <details className="outline-markdown"><summary>Preview the master prompt (exactly what is copied)</summary><pre className="master-preview">{masterPrompt.text}</pre></details></>}
-      </div>
-      <div className="plan-section" id="study-pack-form"><div className="plan-section-heading"><div><span className="step-number">3</span><div><h3>Study one topic at a time</h3><span className="plan-help">Choose a topic in the outline. LearnOS gathers its own passages for one study session; a topic too large for one session is divided into parts.</span></div></div></div>
-        <div className="unit-settings"><label className="field-label">Session size<select className="text-input" value={sessionSize} onChange={event=>changeSize(event.target.value as SessionSize)}><option value="compact">Compact · about 4k tokens</option><option value="standard">Standard · about 8k tokens</option><option value="large">Large · about 16k tokens</option><option value="xl">Extra large · about 32k tokens</option></select></label></div>
-        <p className="plan-help">Sizes are estimates: ChatGPT, Gemini and Claude count tokens differently. About a quarter of each size is left free for the conversation.</p>
-        {unitError&&<p className="plan-error" role="alert">{unitError}</p>}
-        {unitBusy&&<p className="plan-status updating" role="status"><LoaderCircle size={13} className="learn-spin"/>Preparing the topic… a topic too large for one session is divided into parts, which can take a few seconds.</p>}
-        {currentUnit?<div className="study-unit">
-          <nav className="unit-trail" aria-label="Topic and its parts">{unitTrail.map((entry,index)=>index<unitTrail.length-1?<span key={entry.node_id}><button type="button" className="link-button" disabled={unitBusy} onClick={()=>void openUnit(entry.node_id,unitTrail.slice(0,index),{retry:false})}>{entry.title}</button><span aria-hidden="true"> › </span></span>:<strong key={entry.node_id}>{entry.title}</strong>)}</nav>
-          {currentUnit.warning&&<p className="plan-warning" role="status">{currentUnit.warning}</p>}
-          {currentUnit.status==="split"?<>
-            <p className="plan-help">{currentUnit.reason} Study the parts in order; each one is prepared when you open it.</p>
-            <div className="outline-topic-list unit-parts">{(currentUnit.children||[]).map(part=>{const done=completedIds.has(part.id);return <article className={`outline-topic${done?" completed":""}`} key={part.id}><label className="outline-check"><input type="checkbox" checked={done} onChange={event=>void markDone(part.id,part.title,event.target.checked)} aria-label={`Mark ${part.title} ${done?"not complete":"complete"}`}/><span>{done?<Check size={13}/>:null}</span></label><button className="outline-topic-button" disabled={unitBusy} onClick={()=>void openUnit(part.id,unitTrail)}><strong>{part.title}</strong>{part.purpose&&<small>{part.purpose}</small>}<em>About {part.estimated_tokens.toLocaleString()} tokens of source material{part.status==="split"?" · divided into parts":""}</em></button></article>})}</div>
-            {(()=>{const parts=currentUnit.children||[];const open=parts.find(part=>!completedIds.has(part.id));return <div className="unit-next">{open?<Button disabled={unitBusy} onClick={()=>void openUnit(open.id,unitTrail)}>{open===parts[0]?"Start with":"Continue with"}: {open.title}</Button>:currentUnit.next?<><span className="plan-help">All parts studied.</span><Button disabled={unitBusy} onClick={()=>openNext(currentUnit.next!)}>Next: {currentUnit.next.title}</Button></>:<span className="plan-help">All parts studied. This is the end of this learning path.</span>}</div>})()}
-          </>:<div className="study-pack-result">
-            <div className="plan-section-heading"><h3>{currentUnit.status==="thin"?"Little material found":"Ready to copy"}</h3><div className="plan-actions"><CopyAnswer text={currentUnit.study_text||""}/><Button variant="ghost" onClick={()=>downloadText(`${fileSlug(currentUnit.title)}.md`,currentUnit.study_text||"")}><Download size={14}/>Download .md</Button></div></div>
-            <p className="plan-help">About {(currentUnit.estimated_tokens||0).toLocaleString()} of {currentUnit.budget_tokens.toLocaleString()} tokens · {plural((currentUnit.sources||[]).filter(source=>!source.is_related).length,"passage")} from this topic{currentUnit.related_passages?` · ${plural(currentUnit.related_passages,"related passage")} from elsewhere in this space`:""}. Copy the instructions and cited excerpts together.</p>
-            {currentUnit.note&&<p className="plan-warning" role="status">{currentUnit.note}</p>}
-            <label className="unit-done"><input type="checkbox" checked={unitDone} onChange={event=>void markDone(currentUnit.node_id,currentUnit.title,event.target.checked)}/>I studied this {currentUnit.depth?"part":"topic"}</label>
-            <div className="unit-next">{currentUnit.next?<><Button disabled={unitBusy} onClick={()=>void doneAndNext()}>{unitDone?"Continue":"Mark done and continue"}</Button><span className="plan-help">Next: {currentUnit.next.title}{currentUnit.next.depth<currentUnit.depth?" (after this topic)":""}</span></>:<span className="plan-help">This is the last {currentUnit.depth?"part of the last topic":"topic"} of this learning path.</span>}</div>
-            {masterPrompt&&<p className="plan-help">When you finish with your tutor, write “{masterPrompt.done_words}” in the chat for a recap and review questions.</p>}
-            <div className="plan-syllabus"><MarkdownText text={currentUnit.study_text||""}/></div>
-          </div>}
-        </div>:!unitBusy&&<div className="unit-empty">{masterPrompt?.next_topic?<Button onClick={()=>openNext({id:masterPrompt.next_topic!.id,depth:0})}>{masterPrompt.started?"Continue where you left off":"Start with"}: {masterPrompt.next_topic.title}{masterPrompt.next_topic.partly_done?" (partly done)":""}</Button>:masterPrompt&&masterPrompt.topics>0?<p className="plan-help">You have studied every topic{masterPath?" of this learning path":""}. Open any topic to review it.</p>:null}<p className="plan-help">Or choose any topic in the outline above.</p></div>}
-        <details className="outline-markdown"><summary>Or prepare any topic by name (searches all your passages)</summary><form className="pack-form" onSubmit={event=>void makePack(event)}><label className="field-label">Topic<input className="text-input" list="syllabus-topics" value={topic} onChange={event=>{setTopic(event.target.value);setTopicId(undefined)}} placeholder="Type any topic" required/><datalist id="syllabus-topics">{topicOptions.map((value,index)=><option key={`${value}-${index}`} value={value}/>)}</datalist></label><label className="field-label">Source pack size<select className="text-input" value={maxInputTokens} onChange={event=>setMaxInputTokens(Number(event.target.value))}><option value={4000}>Compact · about 4k tokens</option><option value={6000}>Balanced · about 6k tokens</option><option value={10000}>Expanded · about 10k tokens</option></select></label><Button type="submit" disabled={busy||!topic.trim()}>{busy?<><LoaderCircle size={15}/>Preparing…</>:<><Sparkles size={15}/>Prepare study pack</>}</Button></form>
-        {packError&&<p className="plan-error" role="alert">{packError}</p>}{pack&&<div className="study-pack-result"><div className="plan-section-heading"><h3>Ready to copy</h3><CopyAnswer text={pack.study_text}/></div><p className="plan-help">About {pack.estimated_tokens.toLocaleString()} tokens · {pack.sources.length} passages{pack.omitted_passages?` · ${pack.omitted_passages} more passages did not fit`:""}. Copy the instructions and cited excerpts together.</p>{pack.omitted_passages>0&&<div className="pack-subtopics"><strong>This topic is broader than one pack.</strong><p>Narrow it to one of these related topics, or select a larger pack size.</p>{pack.suggested_subtopics.map((value,index)=><button type="button" key={`${value}-${index}`} onClick={()=>{setTopic(value);setTopicId(undefined);setPack(null)}}>{value}</button>)}</div>}<div className="plan-syllabus"><MarkdownText text={pack.study_text}/></div></div>}</details>
-      </div>
+        {masterPrompt&&<><p className="plan-help">{TUTOR_SETUP[tutor]||TUTOR_SETUP.general} It lists your whole plan and your progress ({masterPrompt.completed} of {plural(masterPrompt.topics,"topic")} studied), so update it now and then.</p>
+        <div className="plan-actions"><CopyAnswer text={masterPrompt.text}/><Button variant="ghost" onClick={()=>downloadText(`${fileSlug(`study plan ${courseName||"all sources"}`)}.md`,masterPrompt.text)}><Download size={14}/>Download</Button></div>
+        <details className="outline-markdown"><summary>Preview (about {masterPrompt.estimated_tokens.toLocaleString()} tokens)</summary><pre className="master-preview">{masterPrompt.text}</pre></details></>}
+      </details>
+      <details className="plan-section optional-section"><summary><strong>Study something not in the plan</strong><span>Optional. LearnOS searches all your passages for any topic you type.</span></summary><form className="pack-form" onSubmit={event=>void makePack(event)}><label className="field-label">Topic<input className="text-input" list="syllabus-topics" value={topic} onChange={event=>{setTopic(event.target.value);setTopicId(undefined)}} placeholder="Type any topic" required/><datalist id="syllabus-topics">{topicOptions.map((value,index)=><option key={`${value}-${index}`} value={value}/>)}</datalist></label><label className="field-label">Size<select className="text-input" value={maxInputTokens} onChange={event=>setMaxInputTokens(Number(event.target.value))}><option value={4000}>Short · about 4k tokens</option><option value={6000}>Standard · about 6k tokens</option><option value={10000}>Long · about 10k tokens</option></select></label><Button type="submit" disabled={busy||!topic.trim()}>{busy?<><LoaderCircle size={15}/>Preparing…</>:<><Sparkles size={15}/>Prepare</>}</Button></form>
+        {packError&&<p className="plan-error" role="alert">{packError}</p>}{pack&&<div className="study-pack-result"><div className="plan-section-heading"><h3>Ready to copy</h3><CopyAnswer text={pack.study_text}/></div><p className="plan-help">About {pack.estimated_tokens.toLocaleString()} tokens · {pack.sources.length} passages{pack.omitted_passages?` · ${pack.omitted_passages} more passages did not fit`:""}.</p>{pack.omitted_passages>0&&<div className="pack-subtopics"><strong>This topic is broader than one session.</strong><p>Narrow it to one of these related topics, or choose a longer size.</p>{pack.suggested_subtopics.map((value,index)=><button type="button" key={`${value}-${index}`} onClick={()=>{setTopic(value);setTopicId(undefined);setPack(null)}}>{value}</button>)}</div>}<div className="plan-syllabus"><MarkdownText text={pack.study_text}/></div></div>}
+      </details>
     </>}
   </section>
 }
 
-function ChatView({messages,busy,activeJobs,failedJobs,retryingJob,retry,send,addSource,courseSelected}:{messages:ChatMessage[];busy:boolean;activeJobs:Job[];failedJobs:Job[];retryingJob:number|null;retry:(id:number)=>void;send:(text:string,files:File[],scope:"space_only"|"space_and_related"|"all_sources")=>void;addSource:()=>void;courseSelected:boolean}){
+// The plan's outline as a tree: groups open and close in place, each topic shows whether it is studied or next.
+// Large plans open only the branch with the next topic; a branch never closes by itself once opened.
+function OutlineTree({nodes,isDone,partly,nextId,open,toggle}:{nodes:OutlineTopic[];isDone:(item:OutlineTopic)=>boolean;partly:Set<string>;nextId?:string;open:(item:OutlineTopic)=>void;toggle:(item:OutlineTopic,completed:boolean)=>void}){
+  const ids=new Set(nodes.map(node=>node.id))
+  const children=new Map<string,OutlineTopic[]>()
+  const roots:OutlineTopic[]=[]
+  nodes.forEach(node=>{if(!node.parentId||node.parentId.toLowerCase()==="none"||!ids.has(node.parentId)||node.parentId===node.id)roots.push(node);else children.set(node.parentId,[...(children.get(node.parentId)||[]),node])})
+  // Nodes a malformed plan leaves unreachable (parents that loop) are shown at the end rather than lost.
+  const reached=new Set<string>();const visit=(id:string)=>{if(reached.has(id))return;reached.add(id);(children.get(id)||[]).forEach(child=>visit(child.id))};roots.forEach(root=>visit(root.id))
+  nodes.forEach(node=>{if(!reached.has(node.id)){roots.push(node);visit(node.id)}})
+  const below=new Map<string,{done:number;total:number}>()
+  const count=(id:string,seen:Set<string>):{done:number;total:number}=>{const cached=below.get(id);if(cached)return cached;if(seen.has(id))return {done:0,total:0};seen.add(id);let done=0,total=0;for(const child of children.get(id)||[]){if(child.kind==="study"){total++;if(isDone(child))done++}const inner=count(child.id,seen);done+=inner.done;total+=inner.total}const result={done,total};below.set(id,result);return result}
+  const parentOf=new Map(nodes.map(node=>[node.id,node.parentId]))
+  const everOnPath=useRef(new Set<string>())  // branches opened for "Up next" stay open when it moves on
+  let cursor=nextId?parentOf.get(nextId):undefined;for(let guard=0;cursor&&guard<20;guard++){everOnPath.current.add(cursor);cursor=parentOf.get(cursor)}
+  const small=nodes.filter(node=>node.kind==="study").length<=40
+  const[expanded,setExpanded]=useState<Record<string,boolean>>({})
+  const isOpen=(id:string)=>expanded[id]??(small||everOnPath.current.has(id))
+  const flip=(id:string)=>setExpanded(value=>({...value,[id]:!isOpen(id)}))
+  const row=(item:OutlineTopic,depth:number,seen:Set<string>):ReactNode=>{
+    if(seen.has(item.id)||depth>12)return null
+    const inner=new Set(seen).add(item.id)
+    const kids=children.get(item.id)||[]
+    if(item.kind==="study"){const done=isDone(item);const next=item.id===nextId
+      return <div key={item.id}><div className={`tree-row${done?" completed":""}${next?" next":""}`}>
+        <label className="outline-check"><input type="checkbox" checked={done} onChange={event=>toggle(item,event.target.checked)} aria-label={`Mark ${item.topic} ${done?"not studied":"studied"}`}/><span>{done?<Check size={13}/>:null}</span></label>
+        <button className="outline-topic-button" onClick={()=>open(item)}><strong>{item.topic}</strong>{item.purpose&&<small>{item.purpose}</small>}{item.prerequisites&&item.prerequisites!=="None recorded"&&item.prerequisites.toLowerCase()!=="none"&&<em>Before this: {item.prerequisites}</em>}</button>
+        <span className="tree-badges">{next&&<span className="tree-badge next">Up next</span>}{!done&&partly.has(item.id)&&<span className="tree-badge partly">Partly done</span>}</span>
+      </div>{kids.length>0&&<div className="tree-children">{kids.map(child=>row(child,depth+1,inner))}</div>}</div>}
+    const isExpanded=isOpen(item.id);const {done,total}=count(item.id,new Set())
+    return <div key={item.id} className="tree-group">
+      <button className="tree-toggle" aria-expanded={isExpanded} onClick={()=>flip(item.id)}>{isExpanded?<ChevronDown size={15}/>:<ChevronRight size={15}/>}<span><strong>{item.topic}</strong><small>{total?`${done} of ${plural(total,"topic")} studied`:"No topics yet"}</small></span></button>
+      {isExpanded&&<div className="tree-children">{kids.map(child=>row(child,depth+1,inner))}</div>}
+    </div>
+  }
+  return <div className="outline-tree">{roots.map(root=>{
+    if(root.kind==="study")return row(root,0,new Set())
+    const isExpanded=isOpen(root.id);const {done,total}=count(root.id,new Set())
+    return <section className="outline-group" key={root.id}><button className="tree-root" aria-expanded={isExpanded} onClick={()=>flip(root.id)}>{isExpanded?<ChevronDown size={16}/>:<ChevronRight size={16}/>}<span>{root.topic}</span><small>{done} of {plural(total,"topic")} studied</small></button>{isExpanded&&<div className="outline-topic-list">{(children.get(root.id)||[]).map(child=>row(child,0,new Set([root.id])))}</div>}</section>
+  })}</div>
+}
+
+function ChatView({messages,busy,activeJobs,failedJobs,retryingJob,retry,send,addSource,courseSelected,openPlan}:{messages:ChatMessage[];busy:boolean;activeJobs:Job[];failedJobs:Job[];retryingJob:number|null;retry:(id:number)=>void;send:(text:string,files:File[],scope:"space_only"|"space_and_related"|"all_sources")=>void;addSource:()=>void;courseSelected:boolean;openPlan:()=>void}){
   const[draft,setDraft]=useState("")
   const[files,setFiles]=useState<File[]>([])
   const[fileError,setFileError]=useState("")
@@ -461,7 +579,7 @@ function ChatView({messages,busy,activeJobs,failedJobs,retryingJob,retry,send,ad
         <div className="suggestion-grid">
           <button onClick={()=>setDraft("Explain a difficult idea from my sources in simple terms.")}><span>Understand</span><small>Explain an idea simply</small></button>
           <button onClick={()=>setDraft("Summarize the main ideas in my learning library.")}><span>Review</span><small>Summarize my sources</small></button>
-          <button onClick={()=>setDraft("Make a study plan based on what I have learned so far.")}><span>Plan</span><small>Build a study plan</small></button>
+          <button onClick={openPlan}><span>Plan</span><small>Open your study plan</small></button>
           <button onClick={addSource}><span>Add knowledge</span><small>Choose a file or paste notes</small></button>
         </div>
       </div>:<div className="message-list">{messages.map(message=><article className={`message ${message.role}`} key={message.id}>
@@ -490,12 +608,12 @@ function ChatView({messages,busy,activeJobs,failedJobs,retryingJob,retry,send,ad
 
 function progressValue(progress:string){const match=progress.match(/(\d+)\/(\d+)/);return match?Math.min(100,Math.round(Number(match[1])/Math.max(1,Number(match[2]))*100)):8}
 
-function LibraryView({aiReady,sources,courses,jobs,failedJobs,retryingJob,retry,refresh,addSource}:{aiReady:boolean;sources:Source[];courses:Course[];jobs:Job[];failedJobs:Job[];retryingJob:number|null;retry:(id:number)=>void;refresh:()=>Promise<void>;addSource:()=>void}){
+function LibraryView({aiReady,courseName,sources,courses,jobs,failedJobs,retryingJob,retry,refresh,addSource}:{aiReady:boolean;courseName?:string;sources:Source[];courses:Course[];jobs:Job[];failedJobs:Job[];retryingJob:number|null;retry:(id:number)=>void;refresh:()=>Promise<void>;addSource:()=>void}){
   const[maintenanceNotice,setMaintenanceNotice]=useState("")
   const[maintenanceJobId,setMaintenanceJobId]=useState<number>()
   const[maintenanceProgress,setMaintenanceProgress]=useState<MaintenanceJob|null>(null)
   useEffect(()=>{let current=true;api.maintenanceJobs().then(rows=>{const latest=rows.find(job=>job.task==="organize_existing");if(current&&latest){setMaintenanceJobId(latest.id);setMaintenanceProgress(latest)}}).catch(()=>{});return()=>{current=false}},[])
-  const organizeExisting=async()=>{try{const result=await api.organizeExisting(true);setMaintenanceJobId(result.id);setMaintenanceProgress({...result,task:"organize_existing",errors:{}});setMaintenanceNotice(result.progress_total?`Organization ${result.deduplicated?"is already active":"queued"}.`:"Everything is already organized.")}catch(e){setMaintenanceNotice(e instanceof Error?e.message:"Could not queue organization")}}
+  const organizeExisting=async()=>{try{const result=await api.organizeExisting(false);setMaintenanceJobId(result.id);setMaintenanceProgress({...result,task:"organize_existing",errors:{}});setMaintenanceNotice(result.progress_total?`Organization ${result.deduplicated?"is already active":"queued"}.`:"Everything is already organized.")}catch(e){setMaintenanceNotice(e instanceof Error?e.message:"Could not queue organization")}}
   useEffect(()=>{
     if(!maintenanceJobId||!maintenanceProgress||!["queued","running"].includes(maintenanceProgress.status))return
     let current=true
@@ -514,8 +632,8 @@ function LibraryView({aiReady,sources,courses,jobs,failedJobs,retryingJob,retry,
   const card=(source:Source)=><SourceCard key={source.id} aiReady={aiReady} source={source} job={latestBySource.get(source.id)} failed={isFailed(source)} courses={courses} retryingJob={retryingJob} retry={retry} remove={remove} refresh={refresh}/>
   const section=(title:string,help:string,items:Source[],attention=false)=>items.length>0&&<section className={attention?"attention-section":"library-section"}><div className="attention-heading"><div><h3>{title}</h3><p>{help}</p></div><Badge>{items.length}</Badge></div><div className="library-grid">{items.map(card)}</div></section>
   return <section className="library-view">
-    <div className="library-intro"><div><p className="eyebrow">Your knowledge base</p><h2>Everything you've added</h2><p>Sources are grouped by what they need. Nothing is deleted automatically, so anything that failed can still be recovered.</p><p className="plan-help">Each source shows the study space it is in and why. Use the space menu on a source to move it. When a source's content looks like it belongs elsewhere, LearnOS suggests a move, or showing it in both spaces; nothing moves unless you choose. “Organize existing” reads older sources in full for their key ideas, files unassigned sources and checks where sources belong; your own choices are kept.</p>{maintenanceNotice&&<p className="plan-help" role="status">{maintenanceNotice}</p>}{maintenanceProgress&&<div className="maintenance-progress" aria-live="polite"><div><strong>{maintenanceProgress.status==="done"?"Organization complete":maintenanceProgress.status==="failed"?"Organization needs attention":maintenanceProgress.status==="running"?"Organizing existing sources":"Organization queued"}</strong><span>{maintenanceProgress.progress_current} / {maintenanceProgress.progress_total} items{maintenanceProgress.checkpoint?` · last: ${maintenanceProgress.checkpoint}`:""}</span></div><progress max={Math.max(1,maintenanceProgress.progress_total)} value={maintenanceProgress.progress_current}/>{maintenanceProgress.status==="failed"&&<><ul>{Object.entries(maintenanceProgress.errors||{}).slice(0,3).map(([key,value])=><li key={key}>{key}: {value}</li>)}</ul><Button variant="outline" onClick={()=>void retryOrganization()}>Retry organization</Button></>}</div>}</div><div className="plan-actions"><Button variant="outline" disabled={maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)} onClick={()=>void organizeExisting()}>{maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)?<><LoaderCircle size={14}/>Organizing…</>:"Organize existing"}</Button><Button onClick={addSource}><Plus size={16}/>Add a source</Button></div></div>
-    {!sources.length?<div className="library-empty"><div className="welcome-icon"><FolderOpen size={23}/></div><h3>Your library is ready when you are</h3><p>Add a video, document, or transcript. LearnOS will take care of organizing it.</p><Button onClick={addSource}><Plus size={16}/>Add your first source</Button></div>:<>
+    <div className="library-intro"><div><p className="eyebrow">Your knowledge base</p><h2>Everything you've added</h2><p>Sources are grouped by what they need. Nothing is deleted automatically, so anything that failed can still be recovered.</p><p className="plan-help">LearnOS organizes your material in the background: it reads every source, files new ones into study spaces, and suggests a better place when the content says so. Nothing moves unless you choose.</p>{maintenanceNotice&&<p className="plan-help" role="status">{maintenanceNotice}</p>}{maintenanceProgress&&<div className="maintenance-progress" aria-live="polite"><div><strong>{maintenanceProgress.status==="done"?"Organization complete":maintenanceProgress.status==="failed"?"Organization needs attention":maintenanceProgress.status==="running"?"Organizing existing sources":"Organization queued"}</strong><span>{maintenanceProgress.progress_current} / {maintenanceProgress.progress_total} items{maintenanceProgress.checkpoint?` · last: ${maintenanceProgress.checkpoint}`:""}</span></div><progress max={Math.max(1,maintenanceProgress.progress_total)} value={maintenanceProgress.progress_current}/>{maintenanceProgress.status==="failed"&&<><ul>{Object.entries(maintenanceProgress.errors||{}).slice(0,3).map(([key,value])=><li key={key}>{key}: {value}</li>)}</ul><Button variant="outline" onClick={()=>void retryOrganization()}>Retry organization</Button></>}</div>}</div><div className="plan-actions"><Button variant="outline" disabled={maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)} onClick={()=>void organizeExisting()}>{maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)?<><LoaderCircle size={14}/>Organizing…</>:"Check everything now"}</Button><Button onClick={addSource}><Plus size={16}/>Add a source</Button></div></div>
+    {!sources.length?<div className="library-empty"><div className="welcome-icon"><FolderOpen size={23}/></div><h3>{courseName?`No material in ${courseName} yet`:"Your library is ready when you are"}</h3><p>{courseName?"Add material to this space, or choose All sources to see everything you have added.":"Add a video, document, or notes. LearnOS takes care of organizing it."}</p><Button onClick={addSource}><Plus size={16}/>{courseName?"Add material here":"Add your first material"}</Button></div>:<>
       {section("Needs your input","LearnOS could not read any text from these. Paste the text or a transcript, or remove them.",needsInput,true)}
       {section("Couldn't be processed","Processing stopped. Resume keeps the work already done.",failed,true)}
       {section("Processing","Being prepared in the background. You can keep working.",processing)}
@@ -556,7 +674,7 @@ function SourceCard({aiReady,source,job,failed,courses,retryingJob,retry,remove,
         {suggestion.kind==="add"?<><Button variant="outline" disabled={placing} onClick={()=>void place("move",suggestion.course_id)}>Add to {target}</Button><Button variant="ghost" disabled={placing} onClick={()=>void place("keep",suggestion.course_id)}>Not there</Button></>
         :<><Button variant="outline" disabled={placing} onClick={()=>void place(suggestion.kind==="move"?"move":"show_in_both",suggestion.course_id)}>{suggestion.kind==="move"?`Move to ${target}`:"Show in both"}</Button><Button variant="ghost" disabled={placing} onClick={()=>void place(suggestion.kind==="move"?"show_in_both":"move",suggestion.course_id)}>{suggestion.kind==="move"?"Show in both":`Move to ${target}`}</Button><Button variant="ghost" disabled={placing} onClick={()=>void place("keep",suggestion.course_id)}>Keep here</Button></>}
       </div></div>}
-      {source.status==="done"&&!active&&(source.concepts_pending?<div className="source-coverage pending">{aiReady?"Not fully read for key ideas yet. Use “Organize existing” to read it in full.":"Key ideas need an AI model: add GEMINI_API_KEY, then use “Organize existing”."}</div>:source.sections_pending?<div className="source-coverage pending">Sections not built yet. Use “Organize existing” to finish indexing.</div>:Boolean(source.section_count)&&<div className="source-coverage">{source.section_count} section{source.section_count===1?"":"s"} · {source.concept_count||0} key idea{source.concept_count===1?"":"s"}</div>)}
+      {source.status==="done"&&!active&&(source.concepts_pending?<div className="source-coverage pending">{aiReady?"Not fully read for key ideas yet. LearnOS reads it in the background.":"Key ideas need an AI model: add GEMINI_API_KEY to the .env file and restart LearnOS; it then reads them by itself."}</div>:source.sections_pending?<div className="source-coverage pending">Sections not built yet. LearnOS finishes this in the background.</div>:Boolean(source.section_count)&&<div className="source-coverage">{source.section_count} section{source.section_count===1?"":"s"} · {source.concept_count||0} key idea{source.concept_count===1?"":"s"}</div>)}
       {failed&&<div className="source-error">{job?.error_message||"Processing stopped before this source was ready."}</div>}
       {source.status==="needs_input"&&source.status_message&&<div className="source-error">{source.status_message}</div>}
       {source.status==="done"&&issues.length>0&&<div className="source-issue-note">{[unreadable?`${unreadable} ${itemWord(unreadable)} without captions`:"",temporary?`${temporary} not fetched yet (temporary)`:""].filter(Boolean).join(" · ")}{source.document_count?` out of ${source.document_count}`:""}. The rest is ready to study.</div>}
@@ -605,6 +723,9 @@ function AddSourceDialog({courseId,courses,close,refresh}:{courseId?:number;cour
   const submit=async(event:FormEvent)=>{
     event.preventDefault();setBusy(true);setError("");setNotice("")
     try{
+      if(mode==="file"&&!files.length)throw new Error("Choose a file first.")
+      if(mode==="youtube"&&!url.trim())throw new Error("Paste a YouTube video or playlist link.")
+      if(mode==="paste"&&!pasted.trim())throw new Error("Paste some notes or a transcript first.")
       let targetCourseId:number|undefined
       if(spaceMode==="existing"){
         targetCourseId=Number(spaceId)
@@ -634,13 +755,13 @@ function AddSourceDialog({courseId,courses,close,refresh}:{courseId?:number;cour
     <div className="dialog-tabs" role="tablist">{(["file","youtube","paste"] as AddMode[]).map(item=><button key={item} role="tab" aria-selected={mode===item} className={mode===item?"active":""} onClick={()=>setMode(item)}>{item==="file"?"File":item==="youtube"?"YouTube":"Paste notes"}</button>)}</div>
     <form onSubmit={submit}>
       <div className="dialog-content">
-        <label className="field-label">Learning space<select className="text-input" value={spaceMode} onChange={event=>setSpaceMode(event.target.value as "auto"|"existing"|"new"|"unassigned")}><option value="auto">Let LearnOS decide after processing</option><option value="existing">Add to an existing space</option><option value="new">Create a new space</option><option value="unassigned">Keep in All Sources</option></select></label>
-        {spaceMode==="existing"&&<label className="field-label">Choose a space<select className="text-input" value={spaceId} onChange={event=>setSpaceId(event.target.value)}><option value="">Select a learning space</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}</select></label>}
-        {spaceMode==="new"&&<label className="field-label">New space name<input className="text-input" value={spaceName} onChange={event=>setSpaceName(event.target.value)} placeholder="e.g. Natural Language Processing"/></label>}
         {mode==="file"&&<><input ref={fileRef} type="file" hidden multiple accept=".pdf,.txt,.md,.docx,.pptx,.srt,.vtt,.json" onChange={event=>setFiles(Array.from(event.target.files||[]))}/><button className="file-drop" type="button" onClick={()=>fileRef.current?.click()}><UploadCloud size={23}/><strong>{files.length?`${files.length} file${files.length===1?"":"s"} selected`:"Choose files"}</strong><span>PDF, Word, PowerPoint, text, subtitle, or JSON</span></button>{files.map(file=><div className="file-row" key={file.name}><FileText size={15}/>{file.name}</div>)}</>}
         {mode==="youtube"&&<label className="field-label">Paste a YouTube link<input className="text-input" autoFocus value={url} onChange={event=>setUrl(event.target.value)} placeholder="https://youtu.be/…"/></label>}
         {mode==="paste"&&<label className="field-label">Paste your notes or transcript<textarea className="text-input paste-input" autoFocus value={pasted} onChange={event=>setPasted(event.target.value)} placeholder="Paste text here…"/></label>}
         {(mode!=="file")&&<label className="field-label optional-label">Name <span>optional</span><input className="text-input" value={name} onChange={event=>setName(event.target.value)} placeholder="e.g. Week 2 lecture"/></label>}
+        <label className="field-label">Study space<select className="text-input" value={spaceMode} onChange={event=>setSpaceMode(event.target.value as "auto"|"existing"|"new"|"unassigned")}><option value="auto">Let LearnOS decide (recommended)</option>{courses.length>0&&<option value="existing">Put it in a space I choose</option>}<option value="new">Create a new space</option><option value="unassigned">Keep it in All sources</option></select></label>
+        {spaceMode==="existing"&&<label className="field-label">Choose a space<select className="text-input" value={spaceId} onChange={event=>setSpaceId(event.target.value)}><option value="">Select a space</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}</select></label>}
+        {spaceMode==="new"&&<label className="field-label">New space name<input className="text-input" value={spaceName} onChange={event=>setSpaceName(event.target.value)} placeholder="e.g. Natural Language Processing"/></label>}
         {notice&&<p className="dialog-notice">{notice}</p>}{error&&<p className="dialog-error" role="alert">{error}</p>}
       </div>
       <footer className="dialog-footer"><Button variant="ghost" onClick={close}>Close</Button><Button type="submit" disabled={busy}>{busy?<><LoaderCircle size={15}/>Adding…</>:<><Plus size={15}/>Add source</>}</Button></footer>

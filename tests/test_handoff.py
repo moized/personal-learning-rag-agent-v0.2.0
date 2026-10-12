@@ -231,3 +231,22 @@ def test_a_roll_up_never_takes_another_topics_title_only_progress(uenv):
         _tick(uenv, course_id, part)
     progress = uenv.client.get("/study-progress", params={"course_id": course_id}).json()
     assert "t-0" in progress["completed_topic_ids"] and "Introduction" in progress["completed_legacy_topics"]
+
+
+def test_progress_lists_topics_with_some_parts_studied(uenv):
+    course_id = _big(uenv)
+    first, second = _prepare(uenv, course_id, "t-0", size="compact").json()["children"]
+    _tick(uenv, course_id, first)
+    progress = uenv.client.get("/study-progress", params={"course_id": course_id}).json()
+    assert progress["partly_done_topic_ids"] == ["t-0"]
+    _tick(uenv, course_id, second)  # all parts: the topic itself is done, not partly done
+    progress = uenv.client.get("/study-progress", params={"course_id": course_id}).json()
+    assert progress["partly_done_topic_ids"] == [] and "t-0" in progress["completed_topic_ids"]
+
+
+def test_progress_says_at_which_size_a_partly_studied_topic_was_studied(uenv):
+    course_id = _big(uenv)
+    first = _prepare(uenv, course_id, "t-0", size="compact").json()["children"][0]
+    _tick(uenv, course_id, first)
+    progress = uenv.client.get("/study-progress", params={"course_id": course_id}).json()
+    assert progress["partly_done_budgets"] == {"t-0": 4000}

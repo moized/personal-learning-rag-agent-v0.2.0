@@ -15,6 +15,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..models import Course, MaintenanceJob, Source, StudyPlan, StudyPlanNode
 from ..providers.base import AIProvider
 from .curriculum import build_syllabus_structured
@@ -46,6 +47,8 @@ def plan_revision(db: Session, course_id: int | None) -> str | None:
         course = db.get(Course, course_id)
         if course is not None:
             parts.append(["course", course.name, course.description or "", course.outline or ""])
+    if not settings.gemini_api_key:
+        parts.append(["built without an AI model"])
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 

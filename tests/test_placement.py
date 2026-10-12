@@ -545,3 +545,134 @@ def test_suggestions_never_contradict_each_other_across_random_libraries(env):
                         other = out.get(other_id)
                         assert not (other and other["course_id"] == source.course_id), (suggestion, other)
             db.rollback()
+
+
+# ---------------------------------------------------------------- background organization
+
+def test_the_library_is_organized_in_the_background_without_being_asked(env, monkeypatch):
+    from app.config import settings
+    from app.services.organize import BACKGROUND_TASK
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    spaces, sources = _spaces(env, {"A": ["One", "Two"]})
+    with env.sessions() as db:  # profiles made, passages grouped and read: only the placement check is pending
+        from app.models import Group
+        from app.services.concepts import CONCEPT_PASS
+        for source in db.query(Source).all():
+            source.profile_json = json.dumps({"schema_version": 2, "course_title": source.name})
+        group = Group(name="General")
+        db.add(group)
+        db.flush()
+        for chunk in db.query(Chunk).all():
+            chunk.group_id, chunk.classification_status, chunk.concept_pass = group.id, "done", CONCEPT_PASS
+        db.commit()
+    worker = worker_module.Worker()
+    worker._maybe_organize()  # just started: it waits a minute first
+    with env.sessions() as db:
+        assert db.query(MaintenanceJob).filter_by(task=BACKGROUND_TASK).count() == 0
+    worker._next_organize = 0.0
+    worker._maybe_organize()
+    with env.sessions() as db:
+        job = db.query(MaintenanceJob).filter_by(task=BACKGROUND_TASK).one()
+        items = json.loads(job.items_json)
+        assert {item["kind"] for item in items} == {"placement"}  # never compared with each other yet
+        job.status, job.progress_current = "done", job.progress_total
+        a, b = sorted(sources.values())  # now they have been compared
+        from app.services.learning_paths import _digest
+        db.add(SourceRelationship(source_a_id=a, source_b_id=b, source_a_profile_hash=_digest({}), source_b_profile_hash=_digest({}),
+                                  relation_type="SAME_COURSE", confidence=0.9, rationale="Judged."))
+        db.commit()
+    worker._next_organize = 0.0
+    worker._maybe_organize()
+    with env.sessions() as db:  # nothing left to do: no new run
+        assert db.query(MaintenanceJob).filter_by(task=BACKGROUND_TASK).count() == 1
+
+
+def test_no_background_organization_without_an_ai_key(env, monkeypatch):
+    from app.config import settings
+    from app.services.organize import ORGANIZE_TASKS
+    monkeypatch.setattr(settings, "gemini_api_key", "")
+    spaces, sources = _spaces(env, {"A": ["One", "Two"]})
+    worker = worker_module.Worker()
+    worker._next_organize = 0.0
+    worker._maybe_organize()
+    with env.sessions() as db:
+        assert db.query(MaintenanceJob).filter(MaintenanceJob.task.in_(ORGANIZE_TASKS)).count() == 0
+
+
+def _background_jobs(env):
+    from app.services.organize import BACKGROUND_TASK
+    with env.sessions() as db:
+        return db.query(MaintenanceJob).filter_by(task=BACKGROUND_TASK).order_by(MaintenanceJob.id).all()
+
+
+def _run_job(env, job_id):
+    with env.sessions() as db:
+        db.get(MaintenanceJob, job_id).status = "running"
+        db.commit()
+    worker_module.Worker()._process_maintenance_job(job_id)
+
+
+def test_a_background_run_never_repeats_work_that_failed_while_nothing_changed(env, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    monkeypatch.setattr(worker_module, "extract_batch_concepts", lambda db, ai, source, chunk_ids: None)  # a batch that keeps failing
+    relations = []
+    monkeypatch.setattr(worker_module, "extract_source_relations", lambda db, ai, source_id, **kwargs: relations.append(source_id))
+    spaces, sources = _spaces(env, {"A": ["Only"]})
+    with env.sessions() as db:
+        for source in db.query(Source).all():
+            source.profile_json = json.dumps({"schema_version": 2, "course_title": source.name})
+        db.commit()
+    worker = worker_module.Worker()
+    worker._next_organize = 0.0
+    worker._maybe_organize()
+    jobs = _background_jobs(env)
+    assert len(jobs) == 1 and {item["kind"] for item in json.loads(jobs[0].items_json)} >= {"concepts"}
+    _run_job(env, jobs[0].id)
+    assert relations == []  # nothing new was read: no relation extraction, no AI calls
+    worker._next_organize = 0.0
+    worker._maybe_organize()
+    assert len(_background_jobs(env)) == 1  # the same work on the same state is not tried again
+
+
+def test_work_the_learner_waits_for_goes_before_organizing(env, monkeypatch):
+    from app.services.organize import queue_organization
+    from app.services.plans import request_plan_update
+    spaces, sources = _spaces(env, {"A": ["One", "Two"]})
+    with env.sessions() as db:
+        organize, _ = queue_organization(db, include_unassigned=False, automatic=True)
+        plan = request_plan_update(db, spaces["A"])
+        db.commit()
+        organize_id, plan_id = organize.id, plan.id
+    assert organize_id < plan_id
+    worker = worker_module.Worker()
+    assert worker._claim_maintenance_job() == plan_id  # queued later, claimed first
+    with env.sessions() as db:
+        db.get(MaintenanceJob, plan_id).status = "queued"  # waiting again
+        db.get(MaintenanceJob, organize_id).status = "running"
+        db.commit()
+    worker._process_maintenance_job(organize_id)
+    with env.sessions() as db:
+        job = db.get(MaintenanceJob, organize_id)
+        assert job.status == "queued" and job.progress_current == 0  # it made way, and resumes from where it was
+
+
+def test_a_source_waiting_in_a_background_run_can_still_be_removed(env):
+    from app.services.organize import queue_organization
+    spaces, sources = _spaces(env, {"A": ["One", "Two"]})
+    with env.sessions() as db:
+        job, _ = queue_organization(db, include_unassigned=False, automatic=True)
+        assert any(item["id"] == sources["One"] for item in json.loads(job.items_json))
+        db.commit()
+    assert env.client.delete(f"/sources/{sources['One']}").status_code == 200
+
+
+def test_a_plan_built_without_an_ai_model_is_rebuilt_once_a_key_is_added(env, monkeypatch):
+    from app.config import settings
+    spaces, sources = _spaces(env, {"A": ["One"]})
+    monkeypatch.setattr(settings, "gemini_api_key", "")
+    with env.sessions() as db:
+        offline = plan_revision(db, spaces["A"])
+    monkeypatch.setattr(settings, "gemini_api_key", "test-key")
+    with env.sessions() as db:
+        assert plan_revision(db, spaces["A"]) != offline

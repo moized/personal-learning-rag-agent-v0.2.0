@@ -57,6 +57,8 @@ class Settings(BaseSettings):
 
     worker_count: int = 1
     poll_seconds: float = 2.0
+    # Organize the library in the background every this many hours (0: only when asked); needs an AI key.
+    auto_organize_hours: float = 6.0
     retry_max: int = 4
 
     @property

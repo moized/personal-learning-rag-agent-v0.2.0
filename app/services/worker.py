@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from ..config import settings
 from ..db import session_scope
 from ..models import Source, Document, Chunk, Job, Group, Course, MaintenanceJob, SourceSpace
@@ -21,6 +21,7 @@ from .agent import set_plan
 from .reliability import is_retryable_error, profile_needs_refresh
 from .placement import check_placement, request_placement_check
 from .spaces import spaces_of
+from .organize import ORGANIZE_TASKS, queue_organization, unread_counts
 
 NO_TEXT_MESSAGES = {
     "youtube": "None of these videos have captions LearnOS can read. Paste a transcript for each video in the Library.",
@@ -94,6 +95,7 @@ class Worker(threading.Thread):
                         self.current_maintenance_id = None
                     continue
                 self._requeue_stale_maintenance()
+                self._maybe_organize()
                 time.sleep(settings.poll_seconds)
                 continue
             try:
@@ -109,13 +111,34 @@ class Worker(threading.Thread):
                         if retrying and retrying.status == "retrying":
                             retrying.status = "queued"
 
+    def _maybe_organize(self) -> None:
+        """Queue the library's pending organizing work by itself, a minute after start and then every few
+        hours, so the learner never has to ask. Needs an AI key; a run stopped by the quota resumes next time."""
+        if not settings.gemini_api_key or settings.auto_organize_hours <= 0:
+            return
+        now = time.monotonic()
+        if now < getattr(self, "_next_organize", 0.0):
+            return
+        if not hasattr(self, "_next_organize"):  # give the app a minute to start first
+            self._next_organize = now + 60
+            return
+        self._next_organize = now + settings.auto_organize_hours * 3600
+        try:
+            with session_scope() as db:
+                job, running = queue_organization(db, include_unassigned=False, automatic=True)
+                if job is not None and not running:
+                    logging.info("Organizing the library in the background: %s items", job.progress_total)
+        except Exception:
+            logging.exception("Could not queue background organization")
+
     @staticmethod
     def _is_rate_limit_error(exc: Exception | str) -> bool:
         return isinstance(exc, ProviderRateLimitError) or "429" in str(exc).lower() or "too many requests" in str(exc).lower()
 
     def _claim_maintenance_job(self) -> int | None:
         with session_scope() as db:
-            candidate = db.execute(select(MaintenanceJob.id).where(MaintenanceJob.status == "queued").order_by(MaintenanceJob.id).limit(1)).scalar_one_or_none()
+            candidate = db.execute(select(MaintenanceJob.id).where(MaintenanceJob.status == "queued")
+                                   .order_by(case((MaintenanceJob.task.in_(ORGANIZE_TASKS), 1), else_=0), MaintenanceJob.id).limit(1)).scalar_one_or_none()
             if candidate is None:
                 return None
             now = datetime.now(UTC).replace(tzinfo=None)
@@ -134,10 +157,11 @@ class Worker(threading.Thread):
                 return
             item_ids = json.loads(job.items_json or "[]")
             offset = job.progress_current
+            organizing = job.task in ORGANIZE_TASKS
         ai_unavailable = ""  # once the AI refuses (quota, rate limit, key), later placement checks are skipped
         for index in range(offset, len(item_ids)):
-            if self.stop_event.is_set() or self._job_waiting():
-                # Shutdown, or a source the user added is waiting: resume from this item later.
+            if self.stop_event.is_set() or self._job_waiting() or (organizing and self._priority_work_waiting()):
+                # Shutdown, a source the user added, or a plan the learner waits for: resume from this item later.
                 with session_scope() as db:
                     job = db.get(MaintenanceJob, job_id)
                     if job:
@@ -151,6 +175,8 @@ class Worker(threading.Thread):
             item_key = f"{item_kind}:{item_id}"
             try:
                 if item_kind == "concepts":
+                    with session_scope() as db:
+                        before = unread_counts(db, item_id)
                     # Opens its own sessions, one per batch, so a long backfill commits as it goes.
                     finished = self._extract_concepts(item_id, ai, yield_to_jobs=True, heartbeat_job_id=job_id)
                     if not finished:
@@ -162,8 +188,11 @@ class Worker(threading.Thread):
                         return
                     with session_scope() as db:
                         source = db.get(Source, item_id)
-                        if source is not None:
+                        after = unread_counts(db, item_id) if source is not None else before
+                        # Only what was actually read changes anything: nothing new read costs no further AI calls.
+                        if source is not None and after[0] < before[0]:
                             extract_source_relations(db, ai, item_id, before_window=lambda: self._touch_maintenance(job_id))
+                        if source is not None and (after[0] < before[0] or after[1] < before[1]):
                             request_updates_after_change(db, spaces_of(db, [source.id]))
                 if item_kind == "placement":
                     if ai_unavailable:
@@ -172,7 +201,7 @@ class Worker(threading.Thread):
                         with session_scope() as db:
                             check_placement(db, ai, item_id)
                     except (ProviderRateLimitError, ProviderAuthenticationError):
-                        ai_unavailable = "Skipped: the AI service was unavailable earlier in this run. Run Organize existing again later."
+                        ai_unavailable = "Skipped: the AI service was unavailable earlier in this run. LearnOS tries again later by itself."
                         raise
                 if item_kind == "plan":
                     with session_scope() as db:
@@ -708,6 +737,12 @@ Chunk:
             if job is not None:
                 job.updated_at = datetime.now(UTC).replace(tzinfo=None)
 
+    def _priority_work_waiting(self) -> bool:
+        """A plan update or placement check is queued: organizing the library makes way for it."""
+        with session_scope() as db:
+            return db.execute(select(MaintenanceJob.id).where(MaintenanceJob.status == "queued",
+                                                              MaintenanceJob.task.not_in(ORGANIZE_TASKS)).limit(1)).first() is not None
+
     def _job_waiting(self) -> bool:
         with session_scope() as db:
             return db.execute(select(Job.id).where(Job.status == "queued").limit(1)).first() is not None
@@ -727,7 +762,7 @@ Chunk:
                 job.progress_current = 0
                 job.progress_total = len(batches)
         for number, chunk_ids in enumerate(batches, 1):
-            if yield_to_jobs and (self.stop_event.is_set() or self._job_waiting()):
+            if yield_to_jobs and (self.stop_event.is_set() or self._job_waiting() or self._priority_work_waiting()):
                 return False
             if heartbeat_job_id is not None:
                 self._touch_maintenance(heartbeat_job_id)

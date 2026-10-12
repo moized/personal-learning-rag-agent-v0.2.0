@@ -18,7 +18,7 @@ function dueLabel(iso:string|null){
   return `Due in ${Math.round(days)} day${Math.round(days)===1?"":"s"}`
 }
 
-export default function LearnView({courseId}:{courseId?:number}){
+export default function LearnView({courseId,sourceCount=0,readyCount=0,aiReady=true,addSource,openPlan,openLibrary}:{courseId?:number;sourceCount?:number;readyCount?:number;aiReady?:boolean;addSource?:()=>void;openPlan?:()=>void;openLibrary?:()=>void}){
   const[data,setData]=useState<Overview>({mastery:[],due:[],next:[],misconceptions:[]})
   const[loading,setLoading]=useState(true)
   const[error,setError]=useState("")
@@ -72,7 +72,7 @@ export default function LearnView({courseId}:{courseId?:number}){
     <div className="plan-intro"><p className="eyebrow">Learn for the long term</p><h2>Practice what you've studied.</h2><p>LearnOS quizzes you on the ideas in your sources, tracks how well you know each one, and schedules reviews just before you would forget.</p></div>
     {error&&<p className="plan-error" role="alert">{error}</p>}
     {loading?<div className="plan-empty"><h3><LoaderCircle size={15} className="learn-spin"/> Loading your progress…</h3></div>
-    :empty?<div className="plan-empty"><h3>Nothing to practise yet</h3><p>Once your sources finish processing and LearnOS has found their key ideas, they will appear here for quizzes and review.</p></div>
+    :empty?<div className="plan-empty"><h3>Nothing to practise yet</h3><p>{!sourceCount?"Add your learning material first. Practice quizzes you on the key ideas LearnOS finds in it.":!readyCount?"None of your material could be read yet. Open the Library to see what it needs.":!aiReady?"Practice uses the key ideas in your material, and finding them needs an AI model: add GEMINI_API_KEY to the .env file and restart LearnOS.":"LearnOS is still reading your material for its key ideas. They appear here for quizzes and review as soon as they are found."}</p><div className="plan-actions">{!sourceCount&&addSource?<button type="button" className="btn primary" onClick={addSource}>Add material</button>:!readyCount&&openLibrary?<button type="button" className="btn outline" onClick={openLibrary}>Open the Library</button>:openPlan?<button type="button" className="btn outline" onClick={openPlan}>Go to your study plan</button>:null}</div></div>
     :<>
       <div className="learn-summary" aria-label="Progress summary">
         {(["mastered","learning","due","unseen"] as const).map(status=><div className={`learn-stat ${status}`} key={status}><strong>{counts[status]}</strong><span>{STATUS_LABEL[status]}</span></div>)}

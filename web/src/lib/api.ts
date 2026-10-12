@@ -45,7 +45,7 @@ export const api={
  pasteSourceText:(sourceId:number,text:string,format:PasteFormat)=>req<{source_id:number;job_id:number}>(`/sources/${sourceId}/text`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,input_format:format})}),
  reprocessSource:(sourceId:number)=>req<{source_id:number;job_id:number;documents_retried:number}>(`/sources/${sourceId}/reprocess`,{method:"POST"}),
  removeSource:(sourceId:number,failedAttemptsOnly=false)=>req<{removed:boolean;source_id:number;removed_count:number}>(`/sources/${sourceId}${failedAttemptsOnly?"?failed_attempts_only=true":""}`,{method:"DELETE"}),
- studyProgress:(courseId?:number)=>req<{completed_topics:string[];completed_topic_ids?:string[];completed_legacy_topics?:string[]}>("/study-progress"+(courseId?"?course_id="+courseId:"")),
+ studyProgress:(courseId?:number)=>req<{completed_topics:string[];completed_topic_ids?:string[];completed_legacy_topics?:string[];partly_done_topic_ids?:string[];partly_done_budgets?:Record<string,number>}>("/study-progress"+(courseId?"?course_id="+courseId:"")),
  updateStudyProgress:(topic:string,courseId:number|undefined,completed:boolean,topicId?:string)=>req<any>("/study-progress",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,topic_id:topicId||null,course_id:courseId||null,completed})}),
  jobs:()=>req<Job[]>("/jobs"),
  organizeExisting:(includeUnassigned=true)=>req<Pick<MaintenanceJob,"id"|"status"|"progress_current"|"progress_total"|"checkpoint">&{deduplicated:boolean}>("/maintenance/organize-existing?include_unassigned="+includeUnassigned,{method:"POST"}),
