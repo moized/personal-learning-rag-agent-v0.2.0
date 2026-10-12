@@ -1,4 +1,4 @@
-export type Course={id:number;name:string;description?:string|null;domain?:string|null;outline?:string|null}
+export type Course={id:number;name:string;description?:string|null;domain?:string|null;outline?:string|null;created_by?:string|null;source_count?:number}
 export type SourceIssue={document_id:number;title:string;status:"needs_input"|"failed";message?:string|null}
 export type Source={id:number;name:string;source_type:string;course_id?:number|null;course_name?:string|null;assignment_mode?:string;assignment_status?:string;assignment_reason?:string|null;status:string;status_message?:string|null;topic_hint?:string|null;domain_hint?:string|null;description?:string|null;failed_attempt_count?:number;document_count?:number;section_count?:number;concept_count?:number;index_pending?:number;sections_pending?:number;concepts_pending?:number;issues?:SourceIssue[];also_in?:{course_id:number;course_name:string|null}[];placement?:PlacementSuggestion|null}
 // What a source's content suggests about where it belongs; the learner decides.
@@ -35,6 +35,8 @@ export const api={
  addConversationMessage:(id:string,message:ChatTurn,metadata?:Record<string,any>)=>req<any>(`/conversations/${id}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...message,metadata})}),
  deleteConversation:(id:string)=>req<any>(`/conversations/${id}`,{method:"DELETE"}),
   createCourse:(data:{name:string;domain?:string;description?:string})=>req<Course>("/courses",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)}),
+  // Deletes a study space; its material stays in All sources unless withMaterial.
+  deleteCourse:(courseId:number,withMaterial=false)=>req<{deleted:boolean;course_id:number;removed_sources:number}>(`/courses/${courseId}?with_material=${withMaterial}`,{method:"DELETE"}),
  health:()=>req<any>("/health"),
  courses:()=>req<Course[]>("/courses"),
  sources:(courseId?:number)=>req<Source[]>(courseId?"/sources?course_id="+courseId:"/sources"),

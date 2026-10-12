@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from sqlalchemy import case, delete, func, select, update
 from ..config import settings
-from ..db import session_scope
+from ..db import compact_storage, session_scope
 from ..models import Source, Document, Chunk, Job, Group, Course, MaintenanceJob, SourceSpace
 from ..providers.factory import provider
 from ..providers.base import ProviderAuthenticationError, ProviderQuotaExceededError, ProviderRateLimitError
@@ -22,6 +22,7 @@ from .reliability import is_retryable_error, profile_needs_refresh
 from .placement import check_placement, request_placement_check
 from .spaces import spaces_of
 from .organize import ORGANIZE_TASKS, queue_organization, unread_counts
+from .cleanup import forget_empty_scopes
 
 NO_TEXT_MESSAGES = {
     "youtube": "None of these videos have captions LearnOS can read. Paste a transcript for each video in the Library.",
@@ -67,6 +68,11 @@ class Worker(threading.Thread):
                     job.retry_count = 0
                 job.status = "queued"
         self._requeue_stale_maintenance()
+        try:
+            with session_scope() as db:
+                forget_empty_scopes(db)  # prepared sessions and progress of plans whose material is gone
+        except Exception:
+            logging.exception("Could not clear the study data of empty spaces")
         with session_scope() as db:
             # No plan build is running in a worker that is just starting (one app process per
             # database, as documented): one left "running" was interrupted, and rebuilding is safe
@@ -194,6 +200,8 @@ class Worker(threading.Thread):
                             extract_source_relations(db, ai, item_id, before_window=lambda: self._touch_maintenance(job_id))
                         if source is not None and (after[0] < before[0] or after[1] < before[1]):
                             request_updates_after_change(db, spaces_of(db, [source.id]))
+                if item_kind == "compact":
+                    compact_storage()
                 if item_kind == "placement":
                     if ai_unavailable:
                         raise RuntimeError(ai_unavailable)
@@ -332,7 +340,8 @@ Give a one-sentence reason a learner can read."""
             normalized = new_name.casefold()
             target = next((course for course in courses if course.name.casefold() == normalized), None)
             if target is None:
-                target = Course(name=new_name, description=str(profile.get("description") or "")[:2000], domain=str(profile.get("domain") or "")[:255] or None)
+                target = Course(name=new_name, description=str(profile.get("description") or "")[:2000], domain=str(profile.get("domain") or "")[:255] or None,
+                                created_by="learnos")
                 db.add(target)
                 db.flush()
                 explanation = f'Created a new space "{new_name}" because no existing space matched this source.'

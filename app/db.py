@@ -12,6 +12,8 @@ if url.startswith("sqlite"):
     def _set_sqlite_busy_timeout(dbapi_connection, _connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA busy_timeout=30000")
+        # Deleted content is overwritten, not just marked free: removed material is not left in the file.
+        cursor.execute("PRAGMA secure_delete=ON")
         cursor.close()
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
@@ -33,6 +35,7 @@ def _migrate_sqlite() -> None:
     if not settings.database_url.startswith("sqlite"):
         return
     source_columns = {c["name"] for c in inspect(engine).get_columns("sources")} if "sources" in inspect(engine).get_table_names() else set()
+    _add_missing_columns("courses", {"created_by": "created_by VARCHAR(20)"})
     _add_missing_columns("sources", {
         "curriculum_json": "curriculum_json TEXT",
         "curriculum_hash": "curriculum_hash VARCHAR(64)",
@@ -90,6 +93,24 @@ def init_db() -> None:
     from . import models  # noqa: F401
     Base.metadata.create_all(bind=engine)
     _migrate_sqlite()
+    if settings.database_url.startswith("sqlite") and ":memory:" not in settings.database_url:
+        with engine.connect() as conn:
+            pages = conn.exec_driver_sql("PRAGMA page_count").scalar() or 0
+            free = conn.exec_driver_sql("PRAGMA freelist_count").scalar() or 0
+        if pages > 256 and free > pages / 4:  # mostly deleted data: erase it and give the space back
+            compact_storage()
+
+
+def compact_storage(target=None) -> None:
+    """Rewrite the database file without its free space and empty the write-ahead log, so text that was
+    deleted (before secure_delete, or still in old log frames) is not left anywhere in the files."""
+    target = target or engine
+    if target.dialect.name != "sqlite" or ":memory:" in str(target.url):
+        return
+    with target.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.exec_driver_sql("VACUUM")
+        conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
 
 
 @contextmanager

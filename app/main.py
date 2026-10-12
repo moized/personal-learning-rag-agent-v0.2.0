@@ -25,6 +25,7 @@ from .services.progress import plan_topic_of, roll_up, save_progress
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
 from .services.spaces import also_in, in_space, spaces_of
 from .services.organize import index_pending, queue_organization
+from .services.cleanup import delete_files, delete_sources, remove_empty_spaces, remove_space, request_compaction
 from .services.placement import keep_here, keep_out, request_placement_check, suggestions as placement_suggestions
 
 app = FastAPI(title=settings.app_name)
@@ -213,7 +214,7 @@ def create_course(req: CourseRequest):
         existing = db.execute(select(Course).where(Course.name == req.name)).scalar_one_or_none()
         if existing:
             return {"id": existing.id, "name": existing.name, "deduplicated": True}
-        course = Course(name=req.name, description=req.description, domain=req.domain, outline=req.outline)
+        course = Course(name=req.name, description=req.description, domain=req.domain, outline=req.outline, created_by="you")
         db.add(course)
         db.flush()
         return {"id": course.id, "name": course.name}
@@ -222,10 +223,35 @@ def create_course(req: CourseRequest):
 @app.get("/courses")
 def courses():
     with session_scope() as db:
+        filed = dict(db.execute(select(Source.course_id, func.count(Source.id)).where(Source.course_id.is_not(None)).group_by(Source.course_id)).all())
+        shown = dict(db.execute(select(SourceSpace.course_id, func.count(SourceSpace.id)).group_by(SourceSpace.course_id)).all())
         return [
-            {"id": c.id, "name": c.name, "description": c.description, "domain": c.domain, "outline": c.outline}
+            {"id": c.id, "name": c.name, "description": c.description, "domain": c.domain, "outline": c.outline,
+             "created_by": c.created_by, "source_count": filed.get(c.id, 0) + shown.get(c.id, 0)}
             for c in db.execute(select(Course).order_by(Course.name)).scalars().all()
         ]
+
+
+@app.delete("/courses/{course_id}")
+def delete_course(course_id: int, with_material: bool = False):
+    """Delete a study space. Its material is kept in All sources, or deleted with it when asked."""
+    local_paths: list = []
+    with session_scope() as db:
+        course = db.get(Course, course_id)
+        if course is None:
+            raise HTTPException(status_code=404, detail="Study space not found")
+        filed = db.execute(select(Source).where(Source.course_id == course_id)).scalars().all()
+        if with_material and filed:
+            busy = db.execute(select(Job.id).where(Job.source_id.in_([s.id for s in filed]), Job.status.in_(["queued", "running", "retrying"])).limit(1)).first()
+            if busy:
+                raise HTTPException(status_code=409, detail="Some material in this space is still being processed. Try again when it is ready.")
+        material_changed = with_material and bool(filed)
+        local_paths = remove_space(db, course, with_material=with_material)
+        if material_changed:
+            request_updates_after_change(db, set())
+        request_compaction(db)
+    delete_files(local_paths)
+    return {"deleted": True, "course_id": course_id, "removed_sources": len(filed) if with_material else 0}
 
 
 @app.get("/sources")
@@ -357,6 +383,8 @@ def _file_source(db, source: Source, course_id: int | None, reason: str) -> None
         request_updates_after_change(db, {previous_course, course_id} | dropped)
     if source.status == "done" and previous_course != course_id:
         request_placement_check(db, [source.id])  # how it fits its new neighbours is judged in the background
+    if previous_course != course_id:
+        remove_empty_spaces(db, {previous_course})  # a space LearnOS made is removed once nothing is left in it
 
 
 class PlacementRequest(BaseModel):
@@ -449,49 +477,16 @@ def remove_source(source_id: int, failed_attempts_only: bool = False):
             if any(isinstance(item, dict) and item.get("kind") in {"concepts", "source"} and int(item.get("id", -1)) in source_ids for item in pending):
                 raise HTTPException(status_code=409, detail="LearnOS is still organizing this source in the background. Try again in a moment, when LearnOS has finished organizing it.")
 
-        document_ids = [row[0] for row in db.execute(select(Document.id).where(Document.source_id.in_(source_ids))).all()]
-        chunk_rows = db.execute(select(Chunk.id, Chunk.parent_chunk_id).where(Chunk.document_id.in_(document_ids))).all() if document_ids else []
-        chunk_ids = {row.id for row in chunk_rows}
-        db.execute(delete(Section).where(Section.source_id.in_(source_ids)))
-        if chunk_ids:
-            db.execute(delete(ChunkRelation).where(or_(ChunkRelation.from_chunk_id.in_(chunk_ids), ChunkRelation.to_chunk_id.in_(chunk_ids))))
-            db.execute(delete(Evidence).where(Evidence.chunk_id.in_(chunk_ids)))
-            # Remove leaf chunks before their parent windows to respect the self-reference.
-            remaining = {row.id: row.parent_chunk_id for row in chunk_rows}
-            while remaining:
-                parents = {parent for parent in remaining.values() if parent is not None}
-                removable = set(remaining).difference(parents)
-                if not removable:
-                    removable = set(remaining)
-                db.execute(delete(Chunk).where(Chunk.id.in_(removable)))
-                for chunk_id in removable:
-                    remaining.pop(chunk_id, None)
-            orphan_concepts = [row[0] for row in db.execute(
-                select(Concept.id).where(~select(Evidence.id).where(Evidence.concept_id == Concept.id).exists())
-            ).all()]
-            if orphan_concepts:
-                db.execute(delete(ConceptRelation).where(or_(ConceptRelation.from_concept_id.in_(orphan_concepts), ConceptRelation.to_concept_id.in_(orphan_concepts))))
-                db.execute(delete(Concept).where(Concept.id.in_(orphan_concepts)))
-        if document_ids:
-            db.execute(delete(Document).where(Document.id.in_(document_ids)))
-        db.execute(delete(Job).where(Job.source_id.in_(source_ids)))
-        db.execute(delete(SourceRelationship).where(or_(SourceRelationship.source_a_id.in_(source_ids), SourceRelationship.source_b_id.in_(source_ids))))
-        upload_root = settings.upload_path.resolve()
-        for item in related_sources:
-            if item.local_path:
-                candidate = Path(item.local_path).resolve()
-                if candidate.is_relative_to(upload_root):
-                    local_paths.append(candidate)
-        affected_courses = spaces_of(db, [item.id for item in related_sources if item.status == "done"])
-        db.execute(delete(SourceSpace).where(SourceSpace.source_id.in_(source_ids)))
-        db.execute(delete(Source).where(Source.id.in_(source_ids)))
+        files, affected_courses = delete_sources(db, related_sources)
+        local_paths.extend(files)
+        removed_spaces = remove_empty_spaces(db, affected_courses)
+        affected_courses -= set(removed_spaces)
+        request_compaction(db)
         if affected_courses:
             request_updates_after_change(db, affected_courses)
 
-    for path in local_paths:
-        if path.exists():
-            path.unlink()
-    return {"removed": True, "source_id": source_id, "removed_count": len(source_ids)}
+    delete_files(local_paths)
+    return {"removed": True, "source_id": source_id, "removed_count": len(source_ids), "removed_spaces": removed_spaces}
 
 
 def _has_active_job(db, source_id: int) -> bool:

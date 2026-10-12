@@ -15,6 +15,8 @@ class Course(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
     outline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # "learnos" when LearnOS made the space while filing a source (removed once empty), "you" when the learner did.
+    created_by: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

@@ -16,7 +16,7 @@ function normalizePlanRelationships(value:unknown):PlanRelationships{
   return {sources:Array.isArray(data.sources)?data.sources:[],cross_paths:Array.isArray(data.cross_paths)?data.cross_paths:[],shared_foundations:Array.isArray(data.shared_foundations)?data.shared_foundations.filter((item):item is string=>typeof item==="string"):[]}
 }
 
-function Button({children,onClick,variant="primary",disabled=false,type="button"}:{children:ReactNode;onClick?:()=>void;variant?:"primary"|"outline"|"ghost";disabled?:boolean;type?:"button"|"submit"}){
+function Button({children,onClick,variant="primary",disabled=false,type="button"}:{children:ReactNode;onClick?:()=>void;variant?:"primary"|"outline"|"ghost"|"danger";disabled?:boolean;type?:"button"|"submit"}){
   return <button className={`btn ${variant}`} type={type} onClick={onClick} disabled={disabled}>{children}</button>
 }
 function Badge({children}:{children:ReactNode}){return <span className="badge">{children}</span>}
@@ -175,6 +175,7 @@ export default function App(){
   const[busy,setBusy]=useState(false)
   const[retryingJob,setRetryingJob]=useState<number|null>(null)
   const[addOpen,setAddOpen]=useState(false)
+  const[deletingSpace,setDeletingSpace]=useState<Course|null>(null)
   const[error,setError]=useState("")
   const[health,setHealth]=useState<any>()
   const[planRefreshKey,setPlanRefreshKey]=useState(0)
@@ -299,6 +300,7 @@ export default function App(){
           <option value="">All sources</option>{courses.map(course=><option key={course.id} value={course.id}>{course.name}</option>)}
         </select>
         <button className="text-link create-course" onClick={()=>void createCourse()}><Plus size={14}/>Create a course</button>
+        {courseId!==undefined&&<button className="text-link delete-space" onClick={()=>setDeletingSpace(courses.find(course=>course.id===courseId)||null)}><Trash2 size={14}/>Delete this space</button>}
         <div className="connection"><i className={health?.status==="ok"?"online":"offline"}/>{health?.status==="ok"?"Connected":"Waiting for server"}</div>
       </div>
     </aside>
@@ -313,9 +315,10 @@ export default function App(){
         </div>
       </header>
       {error&&<div className="global-error" role="alert">{error}</div>}
-      {view==="chat"?<ChatView messages={messages} busy={busy} activeJobs={activeJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} send={sendMessage} addSource={()=>setAddOpen(true)} courseSelected={courseId!==undefined} openPlan={()=>setView("plan")}/>:view==="learn"?<LearnView courseId={courseId} sourceCount={sources.length} readyCount={sources.filter(source=>source.status==="done").length} openLibrary={()=>setView("library")} aiReady={health?.llm===true} addSource={()=>setAddOpen(true)} openPlan={()=>setView("plan")}/>:view==="plan"?<StudyPlanView courseId={courseId} courseName={courses.find(course=>course.id===courseId)?.name} sources={sources} sourcesLoaded={health!==undefined&&sourcesFor===(courseId===undefined?"all":String(courseId))} aiReady={health?.llm===true} refreshKey={planRefreshKey} regenerateKey={planRegenerateKey} rebuild={()=>setPlanRegenerateKey(key=>key+1)} addSource={()=>setAddOpen(true)} openLibrary={()=>setView("library")}/>:<LibraryView aiReady={health?.llm===true} courseName={courses.find(course=>course.id===courseId)?.name} sources={sources} courses={courses} jobs={currentJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} refresh={refresh} addSource={()=>setAddOpen(true)}/>}
+      {view==="chat"?<ChatView messages={messages} busy={busy} activeJobs={activeJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} send={sendMessage} addSource={()=>setAddOpen(true)} courseSelected={courseId!==undefined} openPlan={()=>setView("plan")}/>:view==="learn"?<LearnView courseId={courseId} sourceCount={sources.length} readyCount={sources.filter(source=>source.status==="done").length} openLibrary={()=>setView("library")} aiReady={health?.llm===true} addSource={()=>setAddOpen(true)} openPlan={()=>setView("plan")}/>:view==="plan"?<StudyPlanView courseId={courseId} courseName={courses.find(course=>course.id===courseId)?.name} sources={sources} sourcesLoaded={health!==undefined&&sourcesFor===(courseId===undefined?"all":String(courseId))} aiReady={health?.llm===true} refreshKey={planRefreshKey} regenerateKey={planRegenerateKey} rebuild={()=>setPlanRegenerateKey(key=>key+1)} addSource={()=>setAddOpen(true)} openLibrary={()=>setView("library")}/>:<LibraryView aiReady={health?.llm===true} courseName={courses.find(course=>course.id===courseId)?.name} sources={sources} courses={courses} jobs={currentJobs} failedJobs={failedJobs} retryingJob={retryingJob} retry={retryJob} refresh={refresh} addSource={()=>setAddOpen(true)} deleteSpace={courseId!==undefined?()=>setDeletingSpace(courses.find(course=>course.id===courseId)||null):undefined}/>}
     </main>
     {addOpen&&<AddSourceDialog courseId={courseId} courses={courses} close={()=>setAddOpen(false)} refresh={refresh}/>}
+    {deletingSpace&&<DeleteSpaceDialog course={deletingSpace} close={()=>setDeletingSpace(null)} done={()=>{setDeletingSpace(null);if(courseId===deletingSpace.id)setCourseId(undefined);else void refresh()}}/>}
   </div>
 }
 
@@ -608,7 +611,7 @@ function ChatView({messages,busy,activeJobs,failedJobs,retryingJob,retry,send,ad
 
 function progressValue(progress:string){const match=progress.match(/(\d+)\/(\d+)/);return match?Math.min(100,Math.round(Number(match[1])/Math.max(1,Number(match[2]))*100)):8}
 
-function LibraryView({aiReady,courseName,sources,courses,jobs,failedJobs,retryingJob,retry,refresh,addSource}:{aiReady:boolean;courseName?:string;sources:Source[];courses:Course[];jobs:Job[];failedJobs:Job[];retryingJob:number|null;retry:(id:number)=>void;refresh:()=>Promise<void>;addSource:()=>void}){
+function LibraryView({aiReady,courseName,sources,courses,jobs,failedJobs,retryingJob,retry,refresh,addSource,deleteSpace}:{aiReady:boolean;courseName?:string;sources:Source[];courses:Course[];jobs:Job[];failedJobs:Job[];retryingJob:number|null;retry:(id:number)=>void;refresh:()=>Promise<void>;addSource:()=>void;deleteSpace?:()=>void}){
   const[maintenanceNotice,setMaintenanceNotice]=useState("")
   const[maintenanceJobId,setMaintenanceJobId]=useState<number>()
   const[maintenanceProgress,setMaintenanceProgress]=useState<MaintenanceJob|null>(null)
@@ -628,11 +631,15 @@ function LibraryView({aiReady,courseName,sources,courses,jobs,failedJobs,retryin
   const failed=sources.filter(isFailed)
   const ready=sources.filter(source=>source.status==="done"&&!isFailed(source))
   const processing=sources.filter(source=>!needsInput.includes(source)&&!failed.includes(source)&&!ready.includes(source))
-  const remove=async(source:Source,failedOnly=false)=>{const count=source.failed_attempt_count||0;const message=failedOnly?`Remove ${count} failed processing attempts for this video and keep the completed source?`:`Remove "${sourceTitle(source)}" and all duplicate records with its indexed study data?`;if(!window.confirm(message))return;try{await api.removeSource(source.id,failedOnly);await refresh()}catch(e){window.alert(e instanceof Error?e.message:"Could not remove source")}}
+  const emptySpaces=courseName?[]:courses.filter(course=>course.source_count===0)
+  const[clearing,setClearing]=useState(false)
+  const removeEmptySpaces=async()=>{setClearing(true);try{for(const course of emptySpaces)await api.deleteCourse(course.id);await refresh()}catch(e){window.alert(e instanceof Error?e.message:"Could not remove the empty spaces")}finally{setClearing(false)}}
+  const remove=async(source:Source,failedOnly=false)=>{const count=source.failed_attempt_count||0;const message=failedOnly?`Remove ${count} failed processing attempts for this video and keep the completed source?`:`Remove "${sourceTitle(source)}"? It is deleted from LearnOS together with everything made from it: its text, key ideas, practice questions and prepared study sessions. This cannot be undone.`;if(!window.confirm(message))return;try{await api.removeSource(source.id,failedOnly);await refresh()}catch(e){window.alert(e instanceof Error?e.message:"Could not remove source")}}
   const card=(source:Source)=><SourceCard key={source.id} aiReady={aiReady} source={source} job={latestBySource.get(source.id)} failed={isFailed(source)} courses={courses} retryingJob={retryingJob} retry={retry} remove={remove} refresh={refresh}/>
   const section=(title:string,help:string,items:Source[],attention=false)=>items.length>0&&<section className={attention?"attention-section":"library-section"}><div className="attention-heading"><div><h3>{title}</h3><p>{help}</p></div><Badge>{items.length}</Badge></div><div className="library-grid">{items.map(card)}</div></section>
   return <section className="library-view">
-    <div className="library-intro"><div><p className="eyebrow">Your knowledge base</p><h2>Everything you've added</h2><p>Sources are grouped by what they need. Nothing is deleted automatically, so anything that failed can still be recovered.</p><p className="plan-help">LearnOS organizes your material in the background: it reads every source, files new ones into study spaces, and suggests a better place when the content says so. Nothing moves unless you choose.</p>{maintenanceNotice&&<p className="plan-help" role="status">{maintenanceNotice}</p>}{maintenanceProgress&&<div className="maintenance-progress" aria-live="polite"><div><strong>{maintenanceProgress.status==="done"?"Organization complete":maintenanceProgress.status==="failed"?"Organization needs attention":maintenanceProgress.status==="running"?"Organizing existing sources":"Organization queued"}</strong><span>{maintenanceProgress.progress_current} / {maintenanceProgress.progress_total} items{maintenanceProgress.checkpoint?` · last: ${maintenanceProgress.checkpoint}`:""}</span></div><progress max={Math.max(1,maintenanceProgress.progress_total)} value={maintenanceProgress.progress_current}/>{maintenanceProgress.status==="failed"&&<><ul>{Object.entries(maintenanceProgress.errors||{}).slice(0,3).map(([key,value])=><li key={key}>{key}: {value}</li>)}</ul><Button variant="outline" onClick={()=>void retryOrganization()}>Retry organization</Button></>}</div>}</div><div className="plan-actions"><Button variant="outline" disabled={maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)} onClick={()=>void organizeExisting()}>{maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)?<><LoaderCircle size={14}/>Organizing…</>:"Check everything now"}</Button><Button onClick={addSource}><Plus size={16}/>Add a source</Button></div></div>
+    <div className="library-intro"><div><p className="eyebrow">Your knowledge base</p><h2>Everything you've added</h2><p>Sources are grouped by what they need. Nothing is deleted automatically, so anything that failed can still be recovered.</p><p className="plan-help">LearnOS organizes your material in the background: it reads every source, files new ones into study spaces, and suggests a better place when the content says so. Nothing moves unless you choose.</p>{maintenanceNotice&&<p className="plan-help" role="status">{maintenanceNotice}</p>}{maintenanceProgress&&<div className="maintenance-progress" aria-live="polite"><div><strong>{maintenanceProgress.status==="done"?"Organization complete":maintenanceProgress.status==="failed"?"Organization needs attention":maintenanceProgress.status==="running"?"Organizing existing sources":"Organization queued"}</strong><span>{maintenanceProgress.progress_current} / {maintenanceProgress.progress_total} items{maintenanceProgress.checkpoint?` · last: ${maintenanceProgress.checkpoint}`:""}</span></div><progress max={Math.max(1,maintenanceProgress.progress_total)} value={maintenanceProgress.progress_current}/>{maintenanceProgress.status==="failed"&&<><ul>{Object.entries(maintenanceProgress.errors||{}).slice(0,3).map(([key,value])=><li key={key}>{key}: {value}</li>)}</ul><Button variant="outline" onClick={()=>void retryOrganization()}>Retry organization</Button></>}</div>}</div><div className="plan-actions">{deleteSpace&&<Button variant="ghost" onClick={deleteSpace}><Trash2 size={14}/>Delete this space</Button>}<Button variant="outline" disabled={maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)} onClick={()=>void organizeExisting()}>{maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)?<><LoaderCircle size={14}/>Organizing…</>:"Check everything now"}</Button><Button onClick={addSource}><Plus size={16}/>Add a source</Button></div></div>
+    {emptySpaces.length>0&&<p className="plan-warning library-note" role="status">{emptySpaces.length===1?`The study space “${emptySpaces[0].name}” has no material.`:`${emptySpaces.length} study spaces have no material: ${emptySpaces.map(course=>course.name).join(", ")}.`} <button className="link-button" disabled={clearing} onClick={()=>void removeEmptySpaces()}>{emptySpaces.length===1?"Remove it":"Remove them"}</button></p>}
     {!sources.length?<div className="library-empty"><div className="welcome-icon"><FolderOpen size={23}/></div><h3>{courseName?`No material in ${courseName} yet`:"Your library is ready when you are"}</h3><p>{courseName?"Add material to this space, or choose All sources to see everything you have added.":"Add a video, document, or notes. LearnOS takes care of organizing it."}</p><Button onClick={addSource}><Plus size={16}/>{courseName?"Add material here":"Add your first material"}</Button></div>:<>
       {section("Needs your input","LearnOS could not read any text from these. Paste the text or a transcript, or remove them.",needsInput,true)}
       {section("Couldn't be processed","Processing stopped. Resume keeps the work already done.",failed,true)}
@@ -705,6 +712,18 @@ function PasteTextForm({label,onSave,onCancel}:{label:string;onSave:(text:string
     <div className="paste-form-actions"><select className="text-input" aria-label="Text format" value={format} onChange={event=>setFormat(event.target.value as PasteFormat)}><option value="plain">Plain text</option><option value="srt">SRT subtitles</option><option value="vtt">VTT subtitles</option></select><Button type="submit" disabled={busy||!text.trim()}>{busy?<><LoaderCircle size={14}/>Saving…</>:"Save and index"}</Button><Button variant="ghost" onClick={onCancel}>Cancel</Button></div>
     {error&&<p className="dialog-error" role="alert">{error}</p>}
   </form>
+}
+
+function DeleteSpaceDialog({course,close,done}:{course:Course;close:()=>void;done:()=>void}){
+  const[busy,setBusy]=useState(false)
+  const[error,setError]=useState("")
+  const count=course.source_count||0
+  const run=async(withMaterial:boolean)=>{setBusy(true);setError("");try{await api.deleteCourse(course.id,withMaterial);done()}catch(e){setError(e instanceof Error?e.message:"Could not delete this space")}finally{setBusy(false)}}
+  return <div className="dialog-backdrop" onMouseDown={event=>event.currentTarget===event.target&&close()}><section className="add-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-space-title">
+    <header className="dialog-header"><div><h2 id="delete-space-title">Delete “{course.name}”?</h2><p>{count?`It has ${plural(count,"source")}.`:"It has no material."}</p></div><button className="icon-button" aria-label="Close" onClick={close}><X size={18}/></button></header>
+    <div className="dialog-content"><p className="plan-help">{count?"Keep its material and it stays in your library, under All sources. Delete the material too and it is removed from this computer, with everything LearnOS made from it.":"Its study plan and progress are removed."}</p>{error&&<p className="dialog-error" role="alert">{error}</p>}</div>
+    <footer className="dialog-footer"><Button variant="ghost" onClick={close}>Cancel</Button>{count?<><Button variant="outline" disabled={busy} onClick={()=>void run(false)}>Keep the material</Button><Button variant="danger" disabled={busy} onClick={()=>void run(true)}>Delete the material too</Button></>:<Button variant="danger" disabled={busy} onClick={()=>void run(false)}>Delete the space</Button>}</footer>
+  </section></div>
 }
 
 function AddSourceDialog({courseId,courses,close,refresh}:{courseId?:number;courses:Course[];close:()=>void;refresh:()=>Promise<void>}){

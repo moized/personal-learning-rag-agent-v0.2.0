@@ -113,10 +113,10 @@ def build_and_store_plan(db: Session, ai: AIProvider, course_id: int | None, *, 
     revision = plan_revision(db, course_id)
     plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope)).scalar_one_or_none()
     if revision is None:
-        if plan is not None:  # its last source was removed or moved: its topics are no longer valid
-            db.query(StudyPlanNode).filter(StudyPlanNode.plan_id == plan.id).delete(synchronize_session=False)
-            db.delete(plan)
-            db.flush()
+        # Its last source was removed or moved: its topics, prepared sessions and progress are no longer valid.
+        from .cleanup import forget_scope
+        forget_scope(db, scope)
+        db.flush()
         return None
     if plan is not None and plan.revision == revision and not force:
         return plan
