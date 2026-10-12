@@ -1,6 +1,8 @@
 export type Course={id:number;name:string;description?:string|null;domain?:string|null;outline?:string|null}
 export type SourceIssue={document_id:number;title:string;status:"needs_input"|"failed";message?:string|null}
-export type Source={id:number;name:string;source_type:string;course_id?:number|null;course_name?:string|null;assignment_mode?:string;assignment_status?:string;assignment_reason?:string|null;status:string;status_message?:string|null;topic_hint?:string|null;domain_hint?:string|null;description?:string|null;failed_attempt_count?:number;document_count?:number;section_count?:number;concept_count?:number;index_pending?:number;sections_pending?:number;concepts_pending?:number;issues?:SourceIssue[]}
+export type Source={id:number;name:string;source_type:string;course_id?:number|null;course_name?:string|null;assignment_mode?:string;assignment_status?:string;assignment_reason?:string|null;status:string;status_message?:string|null;topic_hint?:string|null;domain_hint?:string|null;description?:string|null;failed_attempt_count?:number;document_count?:number;section_count?:number;concept_count?:number;index_pending?:number;sections_pending?:number;concepts_pending?:number;issues?:SourceIssue[];also_in?:{course_id:number;course_name:string|null}[];placement?:PlacementSuggestion|null}
+// What a source's content suggests about where it belongs; the learner decides.
+export type PlacementSuggestion={kind:"move"|"also"|"add";course_id:number;course_name:string|null;relation:string;confidence:number;related_source:{id:number;name:string};reason:string;leaves_space_empty:boolean}
 export type PasteFormat="plain"|"srt"|"vtt"
 export type PlanStatus="empty"|"ready"|"updating"|"outdated"|"failed"
 export type Job={id:number;source_id:number;source_name?:string|null;source_type?:string|null;source_uri?:string|null;course_id?:number|null;status:string;stage:string;progress:string;checkpoint?:string|null;retry_count:number;created_at?:string|null;started_at?:string|null;updated_at?:string|null;error_message?:string|null}
@@ -36,6 +38,8 @@ export const api={
  health:()=>req<any>("/health"),
  courses:()=>req<Course[]>("/courses"),
  sources:(courseId?:number)=>req<Source[]>(courseId?"/sources?course_id="+courseId:"/sources"),
+ answerPlacement:(sourceId:number,action:"move"|"show_in_both"|"keep",courseId:number)=>req<{id:number;course_id:number|null}>(`/sources/${sourceId}/placement`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,course_id:courseId})}),
+ stopShowingSource:(sourceId:number,courseId:number)=>req<{id:number;removed_from:number}>(`/sources/${sourceId}/spaces/${courseId}`,{method:"DELETE"}),
  moveSource:(sourceId:number,courseId:number|null)=>req<{id:number;course_id:number|null}>(`/sources/${sourceId}/course`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({course_id:courseId})}),
  pasteDocumentTranscript:(documentId:number,text:string,format:PasteFormat)=>req<{document_id:number;source_id:number;job_id:number}>(`/documents/${documentId}/transcript`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,input_format:format})}),
  pasteSourceText:(sourceId:number,text:string,format:PasteFormat)=>req<{source_id:number;job_id:number}>(`/sources/${sourceId}/text`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,input_format:format})}),
@@ -46,6 +50,8 @@ export const api={
  jobs:()=>req<Job[]>("/jobs"),
  organizeExisting:(includeUnassigned=true)=>req<Pick<MaintenanceJob,"id"|"status"|"progress_current"|"progress_total"|"checkpoint">&{deduplicated:boolean}>("/maintenance/organize-existing?include_unassigned="+includeUnassigned,{method:"POST"}),
  maintenanceJobs:()=>req<MaintenanceJob[]>("/maintenance/jobs"),
+ // Placement checks run in the background after a source is added or moved; their suggestions appear when they finish.
+ placementChecksActive:()=>req<MaintenanceJob[]>("/maintenance/jobs?task=check_placement&active=true").then(rows=>rows.length>0),
  retryMaintenanceJob:(id:number)=>req<{id:number;status:string}>(`/maintenance/jobs/${id}/retry`,{method:"POST"}),
  retryJob:(id:number)=>req<{job_id:number;source_id:number;status:string;checkpoint?:string|null}>("/jobs/"+id+"/retry",{method:"POST"}),
  stats:(id:number)=>req<Stats>("/courses/"+id+"/stats"),

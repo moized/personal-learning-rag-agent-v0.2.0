@@ -5,10 +5,10 @@ import threading
 import time
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from ..config import settings
 from ..db import session_scope
-from ..models import Source, Document, Chunk, Job, Group, Course, MaintenanceJob
+from ..models import Source, Document, Chunk, Job, Group, Course, MaintenanceJob, SourceSpace
 from ..providers.factory import provider
 from ..providers.base import ProviderAuthenticationError, ProviderQuotaExceededError, ProviderRateLimitError
 from .ingestion import parse_file, chunk_text, list_youtube_entries, fetch_youtube_transcript, TranscriptUnavailable
@@ -19,6 +19,8 @@ from .plans import PLAN_TASK, build_and_store_plan, plan_revision, request_updat
 from .knowledge_graph import add_sequence_relations, extract_source_relations
 from .agent import set_plan
 from .reliability import is_retryable_error, profile_needs_refresh
+from .placement import check_placement, request_placement_check
+from .spaces import spaces_of
 
 NO_TEXT_MESSAGES = {
     "youtube": "None of these videos have captions LearnOS can read. Paste a transcript for each video in the Library.",
@@ -132,6 +134,7 @@ class Worker(threading.Thread):
                 return
             item_ids = json.loads(job.items_json or "[]")
             offset = job.progress_current
+        ai_unavailable = ""  # once the AI refuses (quota, rate limit, key), later placement checks are skipped
         for index in range(offset, len(item_ids)):
             if self.stop_event.is_set() or self._job_waiting():
                 # Shutdown, or a source the user added is waiting: resume from this item later.
@@ -161,7 +164,16 @@ class Worker(threading.Thread):
                         source = db.get(Source, item_id)
                         if source is not None:
                             extract_source_relations(db, ai, item_id, before_window=lambda: self._touch_maintenance(job_id))
-                            request_updates_after_change(db, {source.course_id})
+                            request_updates_after_change(db, spaces_of(db, [source.id]))
+                if item_kind == "placement":
+                    if ai_unavailable:
+                        raise RuntimeError(ai_unavailable)
+                    try:
+                        with session_scope() as db:
+                            check_placement(db, ai, item_id)
+                    except (ProviderRateLimitError, ProviderAuthenticationError):
+                        ai_unavailable = "Skipped: the AI service was unavailable earlier in this run. Run Organize existing again later."
+                        raise
                 if item_kind == "plan":
                     with session_scope() as db:
                         # Record the content version being built: if it fails, readers see "failed"
@@ -299,6 +311,8 @@ Give a one-sentence reason a learner can read."""
                 explanation = f'Filed into "{target.name}", the space with the same subject name.'
             course_id = target.id
         source.course_id = course_id
+        # Its new home is no longer a space it is only shown in.
+        db.execute(delete(SourceSpace).where(SourceSpace.source_id == source.id, SourceSpace.course_id == course_id))
         if force:
             source.assignment_mode = "auto"
         source.assignment_status = "assigned"
@@ -955,8 +969,11 @@ Chunk:
             src.error = None
             job.status = "done"
             job.stage = "done"
-            # The source's study plan is refreshed in the background, before anyone opens it.
-            request_updates_after_change(db, {src.course_id})
+            # The source's study plans are refreshed in the background, before anyone opens them,
+            # and where it belongs is checked against the other sources.
+            db.flush()  # the space it was just filed in is read back from the database
+            request_updates_after_change(db, spaces_of(db, [src.id]))
+            request_placement_check(db, [src.id])
             job.progress_current = job.progress_total
             job.checkpoint = "done"
             db.commit()

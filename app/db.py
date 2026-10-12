@@ -36,6 +36,9 @@ def _migrate_sqlite() -> None:
     _add_missing_columns("sources", {
         "curriculum_json": "curriculum_json TEXT",
         "curriculum_hash": "curriculum_hash VARCHAR(64)",
+        "centroid_json": "centroid_json TEXT",
+        "centroid_key": "centroid_key VARCHAR(64)",
+        "placement_json": "placement_json TEXT",
         "course_id": "course_id INTEGER",
         "topic_hint": "topic_hint VARCHAR(500)",
         "description": "description TEXT",

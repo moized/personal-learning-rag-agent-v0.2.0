@@ -6,13 +6,14 @@ from ..providers.base import AIProvider
 from ..config import settings
 from .retrieval import retrieve, group_candidates
 from .learning_paths import build_syllabus_structured as build_source_first_syllabus
+from .spaces import in_space
 
 
 def _course_context(db: Session, course_id: int | None) -> tuple[Course | None, list[tuple[str, list[str]]]]:
     course = db.get(Course, course_id) if course_id else None
     stmt = select(Chunk).join(Document, Chunk.document_id == Document.id).join(Source, Document.source_id == Source.id).where(Chunk.embedding_status == "done", Chunk.chunk_kind == "leaf", Source.status == "done")
     if course_id:
-        stmt = stmt.where(Source.course_id == course_id)
+        stmt = stmt.where(in_space(course_id))
     chunk_ids = {c.id for c in db.execute(stmt).scalars().all()}
     scoped_groups = set(db.execute(
         select(Chunk.group_id).where(Chunk.id.in_(chunk_ids), Chunk.group_id.is_not(None)).distinct()

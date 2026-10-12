@@ -13,6 +13,7 @@ from ..models import Chunk, ChunkRelation, Concept, ConceptRelation, Evidence, D
 from ..providers.base import AIProvider
 from ..config import settings
 from .reliability import is_retryable_error
+from .spaces import in_space
 
 
 RELATION_TYPES = {"prerequisite", "parallel", "related", "contradicts"}
@@ -106,7 +107,7 @@ def prerequisite_chain(
                     select(Chunk.id)
                     .join(Document, Chunk.document_id == Document.id)
                     .join(Source, Document.source_id == Source.id)
-                    .where(Chunk.id.in_(evidence_ids), Source.course_id == course_id)
+                    .where(Chunk.id.in_(evidence_ids), in_space(course_id))
                     .limit(1)
                 ).first()
                 if not supported_in_course:
@@ -123,7 +124,7 @@ def prerequisite_chain(
                     .join(Chunk, Evidence.chunk_id == Chunk.id)
                     .join(Document, Chunk.document_id == Document.id)
                     .join(Source, Document.source_id == Source.id)
-                    .where(Evidence.concept_id == prerequisite_id, Source.course_id == course_id)
+                    .where(Evidence.concept_id == prerequisite_id, in_space(course_id))
                     .limit(1)
                 ).first()
                 if not has_course_evidence:
@@ -171,9 +172,9 @@ def prerequisite_evidence_chunks(
                     select(Source)
                     .join(Document, Source.id == Document.source_id)
                     .join(Chunk, Document.id == Chunk.document_id)
-                    .where(Chunk.id == chunk.id)
+                    .where(Chunk.id == chunk.id, in_space(course_id), Source.status == "done")
                 ).scalar_one_or_none()
-                if not source or source.course_id != course_id or source.status != "done":
+                if not source:
                     continue
             seen.add(chunk.id)
             # Prerequisite evidence is intentionally lower-priority than direct retrieval.

@@ -130,13 +130,15 @@ def test_organize_existing_assigns_unassigned_by_profile_and_preserves_manual_ch
 
     monkeypatch.setattr(worker_module, "provider", lambda: Classifier())
     queued = client.post("/maintenance/organize-existing?include_unassigned=true").json()
-    assert queued["progress_total"] == 1
+    assert queued["progress_total"] == 3  # filing the unassigned source, then a placement check for each source
     Worker()._process_maintenance_job(queued["id"])
     with sessions() as db:
         assert db.get(Source, unassigned_id).course_id == course["id"]
         assert db.get(Source, fixed_id).course_id == course["id"]
         job = db.get(MaintenanceJob, queued["id"])
-        assert (job.status, job.progress_current, job.progress_total) == ("done", 1, 1)
+        assert (job.status, job.progress_current, job.progress_total) == ("done", 3, 3)
+        assert json.loads(job.errors_json or "{}") == {}  # an off-topic AI answer to a placement check saves nothing and fails nothing
+        assert db.query(SourceRelationship).count() == 0
     status = client.get("/maintenance/jobs").json()
     assert next(row for row in status if row["id"] == queued["id"])["status"] == "done"
     engine.dispose()

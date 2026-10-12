@@ -165,13 +165,15 @@ export default function App(){
   const previousJobStates=useRef(new Map<number,string>())
   const refreshSequence=useRef(0)
   const chatOpenSequence=useRef(0)
+  const[placementPending,setPlacementPending]=useState(false)
 
   const refresh=async()=>{
     const requestId=++refreshSequence.current
     try{
       setError("")
-      const[c,j,h,s]=await Promise.all([api.courses(),api.jobs(),api.health(),api.sources(courseId)])
+      const[c,j,h,s,checking]=await Promise.all([api.courses(),api.jobs(),api.health(),api.sources(courseId),api.placementChecksActive().catch(()=>false)])
       if(requestId!==refreshSequence.current)return
+      setPlacementPending(checking)
       const terminal=new Set(["done","failed"])
       const becameReady=j.some(job=>previousJobStates.current.get(job.id)!==undefined&&
         !terminal.has(previousJobStates.current.get(job.id)!)&&terminal.has(job.status))
@@ -186,11 +188,18 @@ export default function App(){
   const currentJobs=useMemo(()=>latestJobs(jobs),[jobs])
   const activeJobs=currentJobs.filter(job=>["queued","running","retrying"].includes(job.status))
   const failedJobs=currentJobs.filter(job=>job.status==="failed")
+  // Poll while sources are processing or their placement is being checked; read once more when the checks finish,
+  // so suggestions made by the last check are shown.
+  const polling=activeJobs.length>0||placementPending
+  const wasPolling=useRef(false)
   useEffect(()=>{
-    if(!activeJobs.length)return
+    if(wasPolling.current&&!polling)void refresh()
+    wasPolling.current=polling
+    if(!polling)return
     const timer=window.setInterval(()=>void refresh(),3000)
     return()=>window.clearInterval(timer)
-  },[activeJobs.length,courseId])
+  },[polling,courseId])
+  useEffect(()=>{if(view==="library")void refresh()},[view])
 
   const appendAssistant=(content:string,extra:Partial<ChatMessage>={})=>{const message:ChatMessage={id:newId(),role:"assistant",content,...extra};setMessages(previous=>[...previous,message]);const activeId=conversationIdRef.current;if(activeId)void api.addConversationMessage(activeId,{role:"assistant",content},{evidenceCount:extra.evidenceCount,supplementalSourceCount:extra.supplementalSourceCount,supplementalSources:extra.supplementalSources,retryJobId:extra.retryJobId}).then(()=>api.conversations().then(setConversations)).catch(()=>{})}
   const newChat=async()=>{const requestId=++chatOpenSequence.current;try{const created=await api.createConversation();if(requestId!==chatOpenSequence.current)return;conversationIdRef.current=created.id;setConversationId(created.id);setMessages([]);setConversations(rows=>[{id:created.id,title:created.title,created_at:new Date().toISOString(),updated_at:new Date().toISOString()},...rows]);setView("chat")}catch(e){setError(e instanceof Error?e.message:"Could not create a conversation")}}
@@ -490,7 +499,7 @@ function LibraryView({aiReady,sources,courses,jobs,failedJobs,retryingJob,retry,
   useEffect(()=>{
     if(!maintenanceJobId||!maintenanceProgress||!["queued","running"].includes(maintenanceProgress.status))return
     let current=true
-    const poll=async()=>{try{const rows=await api.maintenanceJobs();const latest=rows.find(job=>job.id===maintenanceJobId);if(current&&latest){setMaintenanceProgress(latest);if(latest.status==="done"){setMaintenanceNotice(latest.progress_total?`Organization finished: ${latest.progress_current}/${latest.progress_total} items processed.`:"Everything is already organized.");void refresh()}if(latest.status==="failed")setMaintenanceNotice(`Organization stopped with ${Object.keys(latest.errors||{}).length} error(s). Review the failed items below and retry.`)}}catch(e){if(current)setMaintenanceNotice(e instanceof Error?e.message:"Could not read organization progress")}}
+    const poll=async()=>{try{const rows=await api.maintenanceJobs();const latest=rows.find(job=>job.id===maintenanceJobId);if(current&&latest){setMaintenanceProgress(latest);if(latest.status==="done"){setMaintenanceNotice(latest.progress_total?`Organization finished: ${latest.progress_current}/${latest.progress_total} items processed.`:"Everything is already organized.");void refresh()}if(latest.status==="failed"){void refresh()}if(latest.status==="failed")setMaintenanceNotice(`Organization stopped with ${Object.keys(latest.errors||{}).length} error(s). Review the failed items below and retry.`)}}catch(e){if(current)setMaintenanceNotice(e instanceof Error?e.message:"Could not read organization progress")}}
     void poll();const timer=window.setInterval(()=>void poll(),1500);return()=>{current=false;window.clearInterval(timer)}
   },[maintenanceJobId,maintenanceProgress?.status])
   const retryOrganization=async()=>{if(!maintenanceJobId)return;try{await api.retryMaintenanceJob(maintenanceJobId);setMaintenanceProgress(value=>value?{...value,status:"queued",progress_current:0,errors:{}}:value);setMaintenanceNotice("Organization retry queued.")}catch(e){setMaintenanceNotice(e instanceof Error?e.message:"Could not retry organization")}}
@@ -505,7 +514,7 @@ function LibraryView({aiReady,sources,courses,jobs,failedJobs,retryingJob,retry,
   const card=(source:Source)=><SourceCard key={source.id} aiReady={aiReady} source={source} job={latestBySource.get(source.id)} failed={isFailed(source)} courses={courses} retryingJob={retryingJob} retry={retry} remove={remove} refresh={refresh}/>
   const section=(title:string,help:string,items:Source[],attention=false)=>items.length>0&&<section className={attention?"attention-section":"library-section"}><div className="attention-heading"><div><h3>{title}</h3><p>{help}</p></div><Badge>{items.length}</Badge></div><div className="library-grid">{items.map(card)}</div></section>
   return <section className="library-view">
-    <div className="library-intro"><div><p className="eyebrow">Your knowledge base</p><h2>Everything you've added</h2><p>Sources are grouped by what they need. Nothing is deleted automatically, so anything that failed can still be recovered.</p><p className="plan-help">Each source shows the study space it is in and why. Use the space menu on a source to move it. “Organize existing” reads older sources in full for their key ideas and files unassigned sources; your own choices are kept.</p>{maintenanceNotice&&<p className="plan-help" role="status">{maintenanceNotice}</p>}{maintenanceProgress&&<div className="maintenance-progress" aria-live="polite"><div><strong>{maintenanceProgress.status==="done"?"Organization complete":maintenanceProgress.status==="failed"?"Organization needs attention":maintenanceProgress.status==="running"?"Organizing existing sources":"Organization queued"}</strong><span>{maintenanceProgress.progress_current} / {maintenanceProgress.progress_total} items{maintenanceProgress.checkpoint?` · last: ${maintenanceProgress.checkpoint}`:""}</span></div><progress max={Math.max(1,maintenanceProgress.progress_total)} value={maintenanceProgress.progress_current}/>{maintenanceProgress.status==="failed"&&<><ul>{Object.entries(maintenanceProgress.errors||{}).slice(0,3).map(([key,value])=><li key={key}>{key}: {value}</li>)}</ul><Button variant="outline" onClick={()=>void retryOrganization()}>Retry organization</Button></>}</div>}</div><div className="plan-actions"><Button variant="outline" disabled={maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)} onClick={()=>void organizeExisting()}>{maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)?<><LoaderCircle size={14}/>Organizing…</>:"Organize existing"}</Button><Button onClick={addSource}><Plus size={16}/>Add a source</Button></div></div>
+    <div className="library-intro"><div><p className="eyebrow">Your knowledge base</p><h2>Everything you've added</h2><p>Sources are grouped by what they need. Nothing is deleted automatically, so anything that failed can still be recovered.</p><p className="plan-help">Each source shows the study space it is in and why. Use the space menu on a source to move it. When a source's content looks like it belongs elsewhere, LearnOS suggests a move, or showing it in both spaces; nothing moves unless you choose. “Organize existing” reads older sources in full for their key ideas, files unassigned sources and checks where sources belong; your own choices are kept.</p>{maintenanceNotice&&<p className="plan-help" role="status">{maintenanceNotice}</p>}{maintenanceProgress&&<div className="maintenance-progress" aria-live="polite"><div><strong>{maintenanceProgress.status==="done"?"Organization complete":maintenanceProgress.status==="failed"?"Organization needs attention":maintenanceProgress.status==="running"?"Organizing existing sources":"Organization queued"}</strong><span>{maintenanceProgress.progress_current} / {maintenanceProgress.progress_total} items{maintenanceProgress.checkpoint?` · last: ${maintenanceProgress.checkpoint}`:""}</span></div><progress max={Math.max(1,maintenanceProgress.progress_total)} value={maintenanceProgress.progress_current}/>{maintenanceProgress.status==="failed"&&<><ul>{Object.entries(maintenanceProgress.errors||{}).slice(0,3).map(([key,value])=><li key={key}>{key}: {value}</li>)}</ul><Button variant="outline" onClick={()=>void retryOrganization()}>Retry organization</Button></>}</div>}</div><div className="plan-actions"><Button variant="outline" disabled={maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)} onClick={()=>void organizeExisting()}>{maintenanceProgress!==null&&["queued","running"].includes(maintenanceProgress.status)?<><LoaderCircle size={14}/>Organizing…</>:"Organize existing"}</Button><Button onClick={addSource}><Plus size={16}/>Add a source</Button></div></div>
     {!sources.length?<div className="library-empty"><div className="welcome-icon"><FolderOpen size={23}/></div><h3>Your library is ready when you are</h3><p>Add a video, document, or transcript. LearnOS will take care of organizing it.</p><Button onClick={addSource}><Plus size={16}/>Add your first source</Button></div>:<>
       {section("Needs your input","LearnOS could not read any text from these. Paste the text or a transcript, or remove them.",needsInput,true)}
       {section("Couldn't be processed","Processing stopped. Resume keeps the work already done.",failed,true)}
@@ -530,6 +539,11 @@ function SourceCard({aiReady,source,job,failed,courses,retryingJob,retry,remove,
     setPasting(null);setNotice("Saved. LearnOS is indexing it now.");await refresh()
   }
   const reprocess=async()=>{try{await api.reprocessSource(source.id);setNotice("Trying again in the background.");await refresh()}catch(e){setNotice(e instanceof Error?e.message:"Could not try again")}}
+  const[placing,setPlacing]=useState(false)
+  const place=async(action:"move"|"show_in_both"|"keep",courseId:number)=>{setPlacing(true);setNotice("");try{await api.answerPlacement(source.id,action,courseId);await refresh()}catch(e){setNotice(e instanceof Error?e.message:"Could not change where this source is")}finally{setPlacing(false)}}
+  const unshow=async(courseId:number)=>{setPlacing(true);setNotice("");try{await api.stopShowingSource(source.id,courseId);await refresh()}catch(e){setNotice(e instanceof Error?e.message:"Could not change where this source is shown")}finally{setPlacing(false)}}
+  const suggestion=source.placement
+  const target=suggestion?`“${suggestion.course_name||"another space"}”`:""
   return <article className={`source-card${failed||source.status==="needs_input"?" source-card-failed":""}`}>
     <div className="source-card-icon"><FileText size={18}/></div>
     <div className="source-card-content">
@@ -537,6 +551,11 @@ function SourceCard({aiReady,source,job,failed,courses,retryingJob,retry,remove,
       <div className="source-card-subtitle">{source.description||source.topic_hint||source.domain_hint||source.name}</div>
       <div className="source-card-footer"><Badge>{statusLabel(status)}</Badge>{active&&job&&<span className="source-progress">{stageLabel(job.stage)} - {job.progress}</span>}</div>
       <div className="source-placement">{source.course_name?<>In <strong>{source.course_name}</strong></>:"Not in a study space yet"}{source.assignment_reason&&<span> · {source.assignment_reason}</span>}</div>
+      {Boolean(source.also_in?.length)&&<div className="source-also-in">Also shown in {source.also_in!.map(space=><span className="space-chip" key={space.course_id}>{space.course_name||"a space"}<button type="button" disabled={placing} aria-label={`Stop showing ${source.name} in ${space.course_name||"this space"}`} onClick={()=>void unshow(space.course_id)}><X size={12}/></button></span>)}</div>}
+      {suggestion&&<div className="placement-suggestion" role="status"><strong>{suggestion.kind==="move"?`Looks like it belongs in ${target}`:suggestion.kind==="also"?`Also fits ${target}`:`Fits ${target}`}</strong><span>{suggestion.reason}{suggestion.leaves_space_empty?" Moving it would leave its current space empty.":""}</span><div className="placement-actions">
+        {suggestion.kind==="add"?<><Button variant="outline" disabled={placing} onClick={()=>void place("move",suggestion.course_id)}>Add to {target}</Button><Button variant="ghost" disabled={placing} onClick={()=>void place("keep",suggestion.course_id)}>Not there</Button></>
+        :<><Button variant="outline" disabled={placing} onClick={()=>void place(suggestion.kind==="move"?"move":"show_in_both",suggestion.course_id)}>{suggestion.kind==="move"?`Move to ${target}`:"Show in both"}</Button><Button variant="ghost" disabled={placing} onClick={()=>void place(suggestion.kind==="move"?"show_in_both":"move",suggestion.course_id)}>{suggestion.kind==="move"?"Show in both":`Move to ${target}`}</Button><Button variant="ghost" disabled={placing} onClick={()=>void place("keep",suggestion.course_id)}>Keep here</Button></>}
+      </div></div>}
       {source.status==="done"&&!active&&(source.concepts_pending?<div className="source-coverage pending">{aiReady?"Not fully read for key ideas yet. Use “Organize existing” to read it in full.":"Key ideas need an AI model: add GEMINI_API_KEY, then use “Organize existing”."}</div>:source.sections_pending?<div className="source-coverage pending">Sections not built yet. Use “Organize existing” to finish indexing.</div>:Boolean(source.section_count)&&<div className="source-coverage">{source.section_count} section{source.section_count===1?"":"s"} · {source.concept_count||0} key idea{source.concept_count===1?"":"s"}</div>)}
       {failed&&<div className="source-error">{job?.error_message||"Processing stopped before this source was ready."}</div>}
       {source.status==="needs_input"&&source.status_message&&<div className="source-error">{source.status_message}</div>}

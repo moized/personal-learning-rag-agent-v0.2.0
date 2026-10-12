@@ -19,6 +19,7 @@ from ..models import Course, MaintenanceJob, Source, StudyPlan, StudyPlanNode
 from ..providers.base import AIProvider
 from .curriculum import build_syllabus_structured
 from .learning_paths import _source_data, source_fingerprint
+from .spaces import in_space
 
 PLAN_TASK = "update_plan"
 NO_SOURCES = "No completed sources are available in this scope yet."
@@ -31,7 +32,7 @@ def scope_key(course_id: int | None) -> str:
 def scope_sources(db: Session, course_id: int | None) -> list[Source]:
     query = select(Source).where(Source.status == "done").order_by(Source.id)
     if course_id is not None:
-        query = query.where(Source.course_id == course_id)
+        query = query.where(in_space(course_id))
     return db.execute(query).scalars().all()
 
 

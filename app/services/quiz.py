@@ -10,6 +10,7 @@ from ..models import Chunk, Concept, Document, Evidence, QuizItem, Source
 from ..providers.base import AIProvider
 from .learner import CORRECT_THRESHOLD, add_misconception, open_misconceptions, record_result
 from .retrieval import tokenize
+from .spaces import in_space
 
 
 def evidence_chunks(db: Session, concept_id: int, course_id: int | None = None, limit: int = 4) -> list[Chunk]:
@@ -23,7 +24,7 @@ def evidence_chunks(db: Session, concept_id: int, course_id: int | None = None, 
         .limit(limit)
     )
     if course_id is not None:
-        stmt = stmt.where(Source.course_id == course_id)
+        stmt = stmt.where(in_space(course_id))
     return db.execute(stmt).scalars().all()
 
 

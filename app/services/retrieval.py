@@ -14,6 +14,7 @@ from ..models import Chunk, Document, Source, Group
 from ..providers.base import AIProvider
 from .grouping import cosine
 from .knowledge_graph import prerequisite_evidence_chunks
+from .spaces import in_space
 
 TOKEN_RE = re.compile(r"[\w./:+#-]+", re.UNICODE)
 
@@ -59,7 +60,7 @@ def _course_chunks(db: Session, course_id: int | None, group_ids: list[int] | No
     if group_ids:
         stmt = stmt.where(Chunk.group_id.in_(group_ids))
     if course_id is not None:
-        stmt = stmt.where(Source.course_id == course_id)
+        stmt = stmt.where(in_space(course_id))
     return db.execute(stmt.order_by(Chunk.id)).scalars().all()
 
 
@@ -78,7 +79,7 @@ def group_candidates(
             .join(Document, Chunk.document_id == Document.id)
             .join(Source, Document.source_id == Source.id)
             .where(
-                Source.course_id == course_id,
+                in_space(course_id),
                 Chunk.embedding_status == "done",
                 Chunk.chunk_kind == "leaf",
                 Source.status == "done",

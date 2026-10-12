@@ -11,6 +11,7 @@ from ..config import settings
 from ..models import Chunk, Concept, Document, Evidence, Section, Source, SourceRelationship
 from ..providers.base import AIProvider, ProviderQuotaExceededError
 from .grouping import cosine
+from .spaces import in_space
 
 RELATION_TYPES = {
     "SAME_COURSE", "SAME_LEARNING_PATH", "COMPLEMENTARY_RESOURCE",
@@ -136,20 +137,12 @@ def _candidate_pairs(db: Session, source_ids: list[int], k: int) -> set[tuple[in
     """
     if len(source_ids) <= k + 1:
         return None
+    from .similarity import centroid  # an even sample over the whole source, cached on it
     centroids: dict[int, list[float]] = {}
-    for source_id in source_ids:
-        vectors = []
-        for (embedding_json,) in db.execute(
-            select(Chunk.embedding_json).join(Document, Chunk.document_id == Document.id)
-            .where(Document.source_id == source_id, Chunk.chunk_kind == "leaf", Chunk.embedding_json.is_not(None))
-            .order_by(Chunk.id).limit(200)
-        ).all():
-            try:
-                vectors.append(json.loads(embedding_json))
-            except json.JSONDecodeError:
-                continue
-        if vectors and all(len(v) == len(vectors[0]) for v in vectors):
-            centroids[source_id] = [sum(values) / len(vectors) for values in zip(*vectors)]
+    for source in db.execute(select(Source).where(Source.id.in_(source_ids))).scalars().all():
+        vector = centroid(db, source)
+        if vector is not None:
+            centroids[source.id] = [float(x) for x in vector]
     if centroids:
         # A source embedded with a different model cannot be ranked; treat it as unembedded.
         dimensions: dict[int, int] = {}
@@ -171,7 +164,8 @@ def _candidate_pairs(db: Session, source_ids: list[int], k: int) -> set[tuple[in
 
 
 def _classify_relationships(db: Session, ai: AIProvider, sources: list[dict], warnings: list[str] | None = None,
-                            candidates: set[tuple[int, int]] | None = None) -> list[dict]:
+                            candidates: set[tuple[int, int]] | None = None,
+                            reraise: tuple[type[BaseException], ...] = (ProviderQuotaExceededError,)) -> list[dict]:
     """Pairwise course identity. Only `candidates` (similar pairs) are sent to the AI when given;
     other pairs are simply not merged, which is what an AI comparison of dissimilar sources returns."""
     warnings = [] if warnings is None else warnings
@@ -216,7 +210,7 @@ Return JSON relationships with source_a_id, source_b_id, type, confidence (0..1)
             for item in result.get("relationships", []):
                 a, b = sorted((int(item["source_a_id"]), int(item["source_b_id"])))
                 generated[(a, b)] = item
-        except ProviderQuotaExceededError:
+        except reraise:
             raise
         except Exception:
             generated = {}
@@ -438,7 +432,7 @@ def build_syllabus_structured(db: Session, ai: AIProvider, course_id: int | None
     unchanged, so adding one source costs that source's outline plus one merge call."""
     query = select(Source).where(Source.status == "done").order_by(Source.id)
     if course_id is not None:
-        query = query.where(Source.course_id == course_id)
+        query = query.where(in_space(course_id))
     source_rows = db.execute(query).scalars().all()
     if not source_rows:
         return "No completed sources are available in this scope yet.", []

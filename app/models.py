@@ -54,8 +54,23 @@ class Source(Base):
     # This source's own topic outline, reused by study plans until its content fingerprint changes.
     curriculum_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     curriculum_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Mean embedding of an even sample of its passages, and what it was computed from.
+    centroid_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    centroid_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The learner's answers to placement suggestions, e.g. {"kept_out_of": [3]}.
+    placement_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class SourceSpace(Base):
+    """A space a source is also shown in, besides the one it is filed in (Source.course_id)."""
+    __tablename__ = "source_spaces"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), index=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (UniqueConstraint("source_id", "course_id", name="uq_source_space"),)
 
 
 class Group(Base):

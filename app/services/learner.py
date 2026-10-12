@@ -12,6 +12,7 @@ from ..models import (
     Chunk, Concept, ConceptMastery, ConceptRelation, Document, Evidence,
     LearnerEvent, Misconception, Source,
 )
+from .spaces import in_space
 
 MASTERED = 0.7
 WEAK = 0.5
@@ -140,7 +141,7 @@ def course_concept_ids(db: Session, course_id: int | None) -> list[int]:
             stmt.join(Chunk, Evidence.chunk_id == Chunk.id)
             .join(Document, Chunk.document_id == Document.id)
             .join(Source, Document.source_id == Source.id)
-            .where(Source.course_id == course_id)
+            .where(in_space(course_id))
         )
     return [row[0] for row in db.execute(stmt).all()]
 

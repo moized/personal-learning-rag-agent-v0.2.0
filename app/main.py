@@ -9,7 +9,7 @@ from sqlalchemy import select, or_, func, delete
 from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import init_db, session_scope
-from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace, ChunkRelation, StudyProgress, StudyPlan, StudyPlanNode, Conversation, ConversationMessage, MaintenanceJob, SourceRelationship, Section
+from .models import Source, Job, Group, Course, Chunk, Document, Concept, ConceptRelation, Evidence, AgentTrace, ChunkRelation, StudyProgress, StudyPlan, StudyPlanNode, Conversation, ConversationMessage, MaintenanceJob, SourceRelationship, Section, SourceSpace
 from .services.concepts import CONCEPT_PASS
 from .services.files import save_upload, save_text_content
 from .services.queue import enqueue
@@ -24,6 +24,8 @@ from .services.units import OutlineTopic, StaleTopic, TopicNotFound, prepare_top
 from .services.handoff import NoPlan, master_prompt
 from .services.progress import roll_up, save_progress
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
+from .services.spaces import also_in, in_space, spaces_of
+from .services.placement import keep_here, keep_out, request_placement_check, suggestions as placement_suggestions
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(
@@ -231,7 +233,7 @@ def sources(course_id: int | None = None):
     with session_scope() as db:
         query = select(Source).order_by(Source.created_at.desc())
         if course_id is not None:
-            query = query.where(Source.course_id == course_id)
+            query = query.where(in_space(course_id))
         source_rows = db.execute(query).scalars().all()
         # Older versions could create multiple rows for the same YouTube URL.
         # Keep the most useful record visible, preferring completed ingestion.
@@ -274,6 +276,8 @@ def sources(course_id: int | None = None):
             .select_from(Evidence).join(Chunk, Evidence.chunk_id == Chunk.id).join(Document, Chunk.document_id == Document.id)
             .where(Document.source_id.in_(ids)).group_by(Document.source_id)
         ).all()) if ids else {}
+        shown_also = also_in(db, ids)
+        placements = placement_suggestions(db, visible)
         # Parts of a source that could not be read, e.g. playlist videos without captions.
         issues: dict[int, list[dict]] = defaultdict(list)
         if ids:
@@ -306,6 +310,10 @@ def sources(course_id: int | None = None):
                 "sections_pending": sections_pending.get(source.id, 0),
                 "concepts_pending": concepts_pending.get(source.id, 0),
                 "issues": issues.get(source.id, []),
+                # Spaces it is also shown in, besides the one it is filed in.
+                "also_in": [{"course_id": c, "course_name": course_names.get(c)} for c in shown_also.get(source.id, [])],
+                # What its content suggests about where it belongs; the learner decides.
+                "placement": placements.get(source.id),
             }
             for source in visible
         ]
@@ -319,15 +327,88 @@ def move_source_to_course(source_id: int, req: SourceCourseRequest):
             raise HTTPException(status_code=404, detail="Source not found")
         if req.course_id is not None and db.get(Course, req.course_id) is None:
             raise HTTPException(status_code=404, detail="Course not found")
-        previous_course = source.course_id
-        source.course_id = req.course_id
-        source.assignment_mode = "explicit_course" if req.course_id is not None else "explicit_unassigned"
-        source.assignment_status = "assigned" if req.course_id is not None else "unassigned"
-        source.assignment_reason = "Changed explicitly in the library."
-        db.flush()
-        if source.status == "done" and previous_course != req.course_id:
-            request_updates_after_change(db, {previous_course, req.course_id})
+        _file_source(db, source, req.course_id, "Changed explicitly in the library.")
         return {"id": source.id, "course_id": source.course_id}
+
+
+def _assignment_conflict(db, existing: Source, assignment_mode: str, course_id: int | None) -> bool:
+    """A source added again conflicts only when it was asked to be in a space it is not in (filed or shown),
+    or to be unfiled while it is filed."""
+    if assignment_mode == "explicit_course":
+        return course_id not in spaces_of(db, [existing.id])
+    return assignment_mode == "explicit_unassigned" and existing.course_id is not None
+
+
+def _file_source(db, source: Source, course_id: int | None, reason: str) -> None:
+    """File a source in a space (its primary place). A space it was only shown in becomes its home."""
+    previous_course = source.course_id
+    source.course_id = course_id
+    source.assignment_mode = "explicit_course" if course_id is not None else "explicit_unassigned"
+    source.assignment_status = "assigned" if course_id is not None else "unassigned"
+    source.assignment_reason = reason
+    # A space it was only shown in becomes its home; an unfiled source is shown in no space at all.
+    links = select(SourceSpace.course_id).where(SourceSpace.source_id == source.id)
+    if course_id is not None:
+        links = links.where(SourceSpace.course_id == course_id)
+    dropped = set(db.execute(links).scalars().all())
+    db.execute(delete(SourceSpace).where(SourceSpace.source_id == source.id, SourceSpace.course_id.in_(dropped)))
+    db.flush()
+    if source.status == "done" and (previous_course != course_id or dropped):
+        request_updates_after_change(db, {previous_course, course_id} | dropped)
+    if source.status == "done" and previous_course != course_id:
+        request_placement_check(db, [source.id])  # how it fits its new neighbours is judged in the background
+
+
+class PlacementRequest(BaseModel):
+    action: Literal["move", "show_in_both", "keep"]
+    course_id: int
+
+
+@app.post("/sources/{source_id}/placement")
+def answer_placement(source_id: int, req: PlacementRequest):
+    """The learner's answer to a placement suggestion: move the source, show it in both spaces, or keep it."""
+    with session_scope() as db:
+        source = db.get(Source, source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="Source not found")
+        course = db.get(Course, req.course_id)
+        if course is None:
+            raise HTTPException(status_code=404, detail="Course not found")
+        if req.action == "move":
+            previous = source.course_id
+            _file_source(db, source, course.id, f'Moved to "{course.name}" because its content matches sources there.')
+            if previous is not None and previous != course.id:
+                keep_out(source, previous)  # moved rather than shown in both: do not offer the old space back
+        elif req.action == "show_in_both":
+            if source.course_id is None:
+                raise HTTPException(status_code=422, detail="File this source in a space first; it can then also be shown in others")
+            if course.id != source.course_id and db.execute(select(SourceSpace.id).where(
+                    SourceSpace.source_id == source.id, SourceSpace.course_id == course.id)).first() is None:
+                db.add(SourceSpace(source_id=source.id, course_id=course.id))
+                db.flush()
+                if source.status == "done":
+                    request_updates_after_change(db, {course.id})
+        else:
+            keep_here(source, course.id)
+        return {"id": source.id, "course_id": source.course_id,
+                "also_in": [{"course_id": c, "course_name": db.get(Course, c).name} for c in also_in(db, [source.id]).get(source.id, [])]}
+
+
+@app.delete("/sources/{source_id}/spaces/{course_id}")
+def stop_showing_source(source_id: int, course_id: int):
+    """Stop showing a source in a space it is only shown in; where it is filed does not change."""
+    with session_scope() as db:
+        link = db.execute(select(SourceSpace).where(SourceSpace.source_id == source_id, SourceSpace.course_id == course_id)).scalar_one_or_none()
+        if link is None:
+            raise HTTPException(status_code=404, detail="This source is not shown in that space")
+        source = db.get(Source, source_id)
+        db.delete(link)
+        if source is not None:
+            keep_out(source, course_id)  # and do not suggest it there again
+        db.flush()
+        if source is not None and source.status == "done":
+            request_updates_after_change(db, {course_id})
+        return {"id": source_id, "removed_from": course_id}
 
 
 @app.delete("/sources/{source_id}")
@@ -399,7 +480,8 @@ def remove_source(source_id: int, failed_attempts_only: bool = False):
                 candidate = Path(item.local_path).resolve()
                 if candidate.is_relative_to(upload_root):
                     local_paths.append(candidate)
-        affected_courses = {item.course_id for item in related_sources if item.status == "done"}
+        affected_courses = spaces_of(db, [item.id for item in related_sources if item.status == "done"])
+        db.execute(delete(SourceSpace).where(SourceSpace.source_id.in_(source_ids)))
         db.execute(delete(Source).where(Source.id.in_(source_ids)))
         if affected_courses:
             request_updates_after_change(db, affected_courses)
@@ -580,7 +662,7 @@ def upload_source(
     with session_scope() as db:
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
-            conflict = (assignment_mode == "explicit_course" and existing.course_id != course_id) or (assignment_mode == "explicit_unassigned" and existing.course_id is not None)
+            conflict = _assignment_conflict(db, existing, assignment_mode, course_id)
             return {"source_id": existing.id, "job_id": None, "deduplicated": True, "assignment_preserved": True, "assignment_conflict": conflict, "course_id": existing.course_id}
         src, job = _create_source(
             db, name=file.filename, source_type="file", course_id=course_id, assignment_mode=assignment_mode,
@@ -618,7 +700,7 @@ def add_manual_source(
     with session_scope() as db:
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
-            conflict = (assignment_mode == "explicit_course" and existing.course_id != course_id) or (assignment_mode == "explicit_unassigned" and existing.course_id is not None)
+            conflict = _assignment_conflict(db, existing, assignment_mode, course_id)
             return {"source_id": existing.id, "job_id": None, "deduplicated": True, "assignment_preserved": True, "assignment_conflict": conflict, "course_id": existing.course_id}
         src, job = _create_source(
             db, name=name, source_type="transcript", course_id=course_id, assignment_mode=assignment_mode,
@@ -641,7 +723,7 @@ def add_manual_transcript(name: str = Form(...), transcript: str = Form(...), co
     with session_scope() as db:
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
-            conflict = (assignment_mode == "explicit_course" and existing.course_id != course_id) or (assignment_mode == "explicit_unassigned" and existing.course_id is not None)
+            conflict = _assignment_conflict(db, existing, assignment_mode, course_id)
             return {"source_id": existing.id, "job_id": None, "deduplicated": True, "assignment_preserved": True, "assignment_conflict": conflict, "course_id": existing.course_id}
         src, job = _create_source(
             db, name=name, source_type="transcript", course_id=course_id, assignment_mode=assignment_mode,
@@ -661,7 +743,7 @@ def add_structured_source(req: StructuredSourceRequest):
     with session_scope() as db:
         existing = db.execute(select(Source).where(Source.content_hash == digest)).scalar_one_or_none()
         if existing:
-            conflict = (req.assignment_mode == "explicit_course" and existing.course_id != req.course_id) or (req.assignment_mode == "explicit_unassigned" and existing.course_id is not None)
+            conflict = _assignment_conflict(db, existing, req.assignment_mode, req.course_id)
             return {"source_id": existing.id, "job_id": None, "deduplicated": True, "assignment_preserved": True, "assignment_conflict": conflict, "course_id": existing.course_id}
         metadata_json = json.dumps(req.metadata, ensure_ascii=False) if req.metadata else None
         domain_hint, topic_hint, description = _metadata_fields(req.metadata, req.domain_hint, req.topic_hint, req.description)
@@ -694,7 +776,7 @@ def add_youtube(url: HttpUrl, name: str | None = None, course_id: int | None = N
                 "deduplicated": True,
                 "assignment_preserved": True,
                 "course_id": existing.course_id,
-                "assignment_conflict": (assignment_mode == "explicit_course" and course_id != existing.course_id) or (assignment_mode == "explicit_unassigned" and existing.course_id is not None),
+                "assignment_conflict": _assignment_conflict(db, existing, assignment_mode, course_id),
             }
         src, job = _create_source(
             db, name=name or str(url), source_type="youtube", course_id=course_id, assignment_mode=assignment_mode,
@@ -803,7 +885,9 @@ def enqueue_existing_organization(include_unassigned: bool = True):
             .distinct()
         ).scalars().all())
         concept_items = [{"kind": "concepts", "id": source_id} for source_id in sorted(unread)]
-        items = [{"kind": "chunk", "id": chunk_id} for chunk_id in chunk_ids] + source_items + concept_items
+        # Last, once profiles and concepts are current: check where each source belongs (pairs judged before cost nothing).
+        placement_items = [{"kind": "placement", "id": source.id} for source in done_sources] if len(done_sources) > 1 else []
+        items = [{"kind": "chunk", "id": chunk_id} for chunk_id in chunk_ids] + source_items + concept_items + placement_items
         row = MaintenanceJob(task="organize_existing", status="queued" if items else "done", progress_total=len(items), items_json=json.dumps(items))
         db.add(row)
         db.flush()
@@ -811,9 +895,15 @@ def enqueue_existing_organization(include_unassigned: bool = True):
 
 
 @app.get("/maintenance/jobs")
-def maintenance_jobs():
+def maintenance_jobs(task: str | None = None, active: bool = False):
+    """Background jobs, newest first; optionally one task, or only those waiting or running."""
     with session_scope() as db:
-        rows = db.execute(select(MaintenanceJob).order_by(MaintenanceJob.id.desc())).scalars().all()
+        query = select(MaintenanceJob).order_by(MaintenanceJob.id.desc())
+        if task:
+            query = query.where(MaintenanceJob.task == task)
+        if active:
+            query = query.where(MaintenanceJob.status.in_(["queued", "running"]))
+        rows = db.execute(query).scalars().all()
         return [{"id": row.id, "task": row.task, "status": row.status, "progress_current": row.progress_current, "progress_total": row.progress_total, "checkpoint": row.checkpoint, "errors": json.loads(row.errors_json or "{}"), "updated_at": row.updated_at.isoformat() if row.updated_at else None} for row in rows]
 
 
@@ -862,7 +952,7 @@ def knowledge_graph(course_id: int):
                 .join(Chunk, Evidence.chunk_id == Chunk.id)
                 .join(Document, Chunk.document_id == Document.id)
                 .join(Source, Document.source_id == Source.id)
-                .where(Source.course_id == course_id)
+                .where(in_space(course_id))
             ).all()
         }
         if not concept_ids:
@@ -884,7 +974,7 @@ def knowledge_graph(course_id: int):
                 select(Chunk.id)
                 .join(Document, Chunk.document_id == Document.id)
                 .join(Source, Document.source_id == Source.id)
-                .where(Source.course_id == course_id, Chunk.chunk_kind == "leaf")
+                .where(in_space(course_id), Chunk.chunk_kind == "leaf")
             ).all()
         }
         supported_relations = []
@@ -1068,7 +1158,7 @@ def update_study_progress(req: StudyProgressRequest):
 @app.get("/courses/{course_id}/stats")
 def course_stats(course_id: int):
     with session_scope() as db:
-        sources = db.execute(select(Source).where(Source.course_id == course_id)).scalars().all()
+        sources = db.execute(select(Source).where(in_space(course_id))).scalars().all()
         unique_youtube: dict[str, Source] = {}
         other_sources: list[Source] = []
         for source in sources:
@@ -1099,7 +1189,7 @@ def course_stats(course_id: int):
                 .join(Chunk, Evidence.chunk_id == Chunk.id)
                 .join(Document, Chunk.document_id == Document.id)
                 .join(Source, Document.source_id == Source.id)
-                .where(Source.course_id == course_id)
+                .where(in_space(course_id))
             ).all()
         }
         relation_count = db.execute(
