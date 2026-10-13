@@ -1,7 +1,7 @@
 """Study units: a plan topic prepared for one study session, split when it is too large.
 
-A topic's own material comes from the sections the study plan linked to it, so no search is
-needed to find it; a search (one embedding call) adds a little related material from elsewhere
+A topic's own material comes from the sections the study plan linked to it (or its share of a
+section it shares with other topics, see coverage), so no search is needed to find it; a search (one embedding call) adds a little related material from elsewhere
 in the space. When the material fits the session it becomes a study unit with no AI call. A topic
 too large for one session costs one fast-model call that groups its material into parts; if that
 call fails, a plain split by size is used. Results are cached per session size and are prepared
@@ -13,14 +13,16 @@ import hashlib
 import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import Chunk, Concept, Course, Document, Evidence, Section, Source, StudyPlan, StudyPlanNode, TopicDetail
 from ..providers.base import AIProvider
+from .coverage import Coverage, narrowed, plan_coverage, shown
 from .plans import reading_order, scope_key
+from .profile import about_me_block, get_profile, practice_instruction
 from .progress import reopen
 from .reliability import is_retryable_error
 from .retrieval import retrieve
@@ -39,8 +41,13 @@ PASSAGE_OVERHEAD = (4 + LABEL_CHARS + 3 + LABEL_CHARS + 9 + 10 + 1 + 2 + 2) // 3
 MAX_PARTS = 6
 TUTOR_NAMES = {"chatgpt": "ChatGPT", "gemini": "Gemini", "claude": "Claude"}
 TUTOR_PLACEHOLDER = "{{TUTOR}}"
+# Replaced when a unit is shown: the earlier units it overlaps and what the learner said about themselves.
+# Both change while the unit's material does not, so they are not kept in the prepared unit.
+CONTEXT_PLACEHOLDER = "{{CONTEXT}}"
+PRACTICE_PLACEHOLDER = "{{PRACTICE}}"  # how the learner likes to practise, also chosen in "About me"
+EXCERPTS_HEADING = "\n\n## Source excerpts\n"  # placeholders are only filled before it, never in the learner's material
 DONE_WORDS = "unit done"  # what the learner writes to end a unit; unusual enough not to come up by accident
-PACK_FORMAT = 2           # bumped when the pack text changes, so cached units are made again
+PACK_FORMAT = 3           # bumped when the pack text changes, so cached units are made again
 
 
 class TopicNotFound(LookupError):
@@ -91,7 +98,9 @@ class Topic:
     purpose: str
     depth: int
     section_ids: list[int]       # the plan topic's sections; its parts keep them
-    chunk_ids: list[int] | None  # a part's own passages; None for a plan topic, which uses its sections
+    # A part's own passages, or a plan topic's share of the sections it shares with other topics (see
+    # coverage); None for a plan topic that teaches all of its sections.
+    chunk_ids: list[int] | None
     chain: list[str]
     objective: str
     prerequisites: str
@@ -101,9 +110,15 @@ class Topic:
     # What the prepared result depends on: the plan's content and this topic's place in it.
     # Parts share their plan topic's version; a cached row is valid while its version matches.
     version: str
+    # Earlier topics from other sources that teach some of the same key ideas, and this topic's new ones (for a
+    # part, only those its passages teach). Not part of the version: they are added when the unit is shown, so
+    # newly read key ideas never make it stale.
+    overlaps: list[dict] = field(default_factory=list)
+    new_ideas: list[str] = field(default_factory=list)
 
 
-def _plan_topic(nodes: dict[str, StudyPlanNode], order: list[str], node: StudyPlanNode, scope: str, plan: StudyPlan) -> Topic:
+def _plan_topic(nodes: dict[str, StudyPlanNode], order: list[str], node: StudyPlanNode, scope: str, plan: StudyPlan,
+                coverage: Coverage) -> Topic:
     meta = json.loads(node.metadata_json or "{}")
     chain: list[str] = []
     parent = nodes.get(node.parent_node_id) if node.parent_node_id else None
@@ -124,9 +139,12 @@ def _plan_topic(nodes: dict[str, StudyPlanNode], order: list[str], node: StudyPl
     purpose = str(meta.get("purpose") or "")
     prerequisites = str(meta.get("prerequisites") or "")
     section_ids = [s for s in meta.get("section_ids") or [] if isinstance(s, int)]
-    version = _digest([PACK_FORMAT, plan.revision, node.node_id, node.title, purpose, prerequisites, section_ids, chain, objective, next_title])
+    chunk_ids = coverage.passages.get(node.node_id)
+    version = _digest([PACK_FORMAT, plan.revision, node.node_id, node.title, purpose, prerequisites, section_ids, chunk_ids, chain,
+                       objective, next_title])
     return Topic(scope=scope, plan=plan, node_id=node.node_id, title=node.title, purpose=purpose, depth=0, section_ids=section_ids,
-                 chunk_ids=None, chain=chain, objective=objective, prerequisites=prerequisites, next=next_item, version=version)
+                 chunk_ids=chunk_ids, chain=chain, objective=objective, prerequisites=prerequisites, next=next_item, version=version,
+                 overlaps=coverage.overlaps.get(node.node_id, []), new_ideas=coverage.new_ideas.get(node.node_id, []))
 
 
 def _detail(db: Session, scope: str, node_id: str, budget: int) -> TopicDetail | None:
@@ -151,7 +169,7 @@ def find_topic(db: Session, course_id: int | None, node_id: str, budget: int) ->
     if node_id in nodes:
         if nodes[node_id].node_type != "study":
             raise OutlineTopic(node_id)
-        return _plan_topic(nodes, [row.node_id for row in reading_order(rows)], nodes[node_id], scope, plan)
+        return _plan_topic(nodes, [row.node_id for row in reading_order(rows)], nodes[node_id], scope, plan, plan_coverage(db, plan))
     detail = _detail(db, scope, node_id, budget)
     if detail is None or not detail.parent_node_id:
         raise TopicNotFound(node_id)
@@ -162,15 +180,20 @@ def find_topic(db: Session, course_id: int | None, node_id: str, budget: int) ->
     position = [child.node_id for child in siblings].index(node_id)
     following = siblings[position + 1] if position < len(siblings) - 1 else None
     next_item = {"id": following.node_id, "title": following.title, "depth": detail.depth} if following is not None else parent.next
+    chunk_ids = json.loads(detail.chunk_ids_json or "[]")
+    taught = set(db.execute(select(Concept.canonical_name).join(Evidence, Evidence.concept_id == Concept.id)
+                            .where(Evidence.chunk_id.in_(chunk_ids))).scalars().all()) if parent.overlaps and chunk_ids else set()
+    overlaps, new_ideas = narrowed(parent.overlaps, parent.new_ideas, taught)
     return Topic(scope=scope, plan=plan, node_id=node_id, title=detail.title, purpose=detail.purpose or "", depth=detail.depth,
-                 section_ids=parent.section_ids, chunk_ids=json.loads(detail.chunk_ids_json or "[]"), chain=parent.chain + [parent.title],
-                 objective=parent.objective, prerequisites=parent.prerequisites, next=next_item, version=parent.version)
+                 section_ids=parent.section_ids, chunk_ids=chunk_ids, chain=parent.chain + [parent.title],
+                 objective=parent.objective, prerequisites=parent.prerequisites, next=next_item, version=parent.version,
+                 overlaps=overlaps, new_ideas=new_ideas)
 
 
 # ------------------------------------------------------------------ evidence
 
 def _primary(db: Session, topic: Topic) -> list[Chunk]:
-    """The topic's own passages in reading order: its part's passages, or its plan sections."""
+    """The topic's own passages in reading order: its part's passages, its share of shared sections, or its plan sections."""
     if topic.chunk_ids is not None:
         if not topic.chunk_ids:
             return []
@@ -476,14 +499,15 @@ def _pack(db: Session, topic: Topic, primary: list[Chunk], related: list[tuple[C
                     + (f" Its purpose: {topic.purpose}" if topic.purpose else "")
                     + "\nUse the source excerpts below as the primary evidence. Explain clearly, define terms, connect ideas, and distinguish what"
                       " the sources say from your own added context. Cite claims with the source labels provided. If the excerpts do not support"
-                      " an answer, say what is missing instead of guessing.\nTeach this unit only; if a prerequisite is missing, explain it briefly"
-                      " and come back. Start by giving me a short overview, then teach one idea at a time. Ask a quick check question and wait for"
-                      " my answer before moving on. Adapt to my answers and correct misunderstandings kindly. Do not dump the whole lesson at once."
+                      " an answer, say what is missing instead of guessing. Some sources give opinions or predictions: present those"
+                      " as the author's view, not as established fact.\nTeach this unit only; if a prerequisite is missing, explain it briefly"
+                      " and come back. Start by giving me a short overview, then teach one idea at a time. " + PRACTICE_PLACEHOLDER
+                    + " Adapt to my answers and correct misunderstandings kindly. Do not dump the whole lesson at once."
                     + f'\nWhen I write "{DONE_WORDS}", give me a recap of this unit in at most five bullet points and three review questions'
                       " (without the answers) to keep for later."
                     + f"\nThis prompt is prepared for {TUTOR_PLACEHOLDER}; keep the response interactive and easy to read.")
     text = f"# Study unit: {topic.title}\n\n## Where this fits\n" + "\n".join(line for line in fits if line)
-    text += f"\n\n## Tutor instructions (paste this with the excerpts)\n{instructions}\n\n## Source excerpts\n" + "\n\n".join(b for _, b in kept)
+    text += f"\n\n{CONTEXT_PLACEHOLDER}## Tutor instructions (paste this with the excerpts)\n{instructions}{EXCERPTS_HEADING}" + "\n\n".join(b for _, b in kept)
     if extra:
         text += "\n\n## Related material from elsewhere in this space\n" + "\n\n".join(b for _, b in extra)
     refs = [{"chunk_id": chunk.id, **labels.get(chunk.id, {}), "is_related": False} for chunk, _ in kept]
@@ -553,7 +577,7 @@ def prepare_topic(db: Session, ai: AIProvider, course_id: int | None, node_id: s
         room = budget_for_sources - primary_tokens
         related = _related(db, ai, topic, course_id, family, 8, issues) if room >= MIN_RELATED_ROOM else []
     else:  # a plan made before topics were linked to sections: find the material by search
-        primary, related = [chunk for chunk, _ in _related(db, ai, topic, course_id, set(), 12, issues)], []
+        primary, related = [chunk for chunk, _ in _related(db, ai, topic, course_id, _topic_passages(db, topic), 12, issues)], []
     course = db.get(Course, course_id) if course_id is not None else None
     payload = _pack(db, topic, primary, related, budget, course.name if course else "All sources")
     notes = []
@@ -580,12 +604,47 @@ def _provisional(issues: list[str]) -> dict:
     return {"provisional": True, "warning": "; ".join(issues) + ". Open it again later for the full result."}
 
 
+def _one_line(value, limit: int = 200) -> str:
+    """Plan titles and key ideas come from the learner's sources through the AI: one line each, so they
+    cannot add headings of their own to the unit."""
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def _fill(text: str, placeholder: str, value: str) -> str:
+    """Fill the placeholder the pack put there: the last one, as titles and purposes come before it."""
+    index = text.rfind(placeholder)
+    return text if index < 0 else text[:index] + value + text[index + len(placeholder):]
+
+
+def _context(profile, overlaps: list[dict], new_ideas: list[str]) -> str:
+    """The parts of a unit added when it is shown: the earlier units from other sources it overlaps, and
+    what the learner said about themselves. Every passage stays in the unit; the tutor does the merging."""
+    block = ""
+    if overlaps:
+        lines = [f"- {_one_line(item.get('title'))}" + (f" (from {_one_line(item.get('path'))})" if item.get("path") else "")
+                 + f": {', '.join(_one_line(idea, 80) for idea in item.get('shared') or [])}" for item in overlaps]
+        new = ", ".join(_one_line(idea, 80) for idea in new_ideas)
+        block = ("## Already met earlier in my plan\nThis unit shares key ideas with earlier units from other sources:\n" + "\n".join(lines)
+                 + (f"\nNew in this unit: {new}." if new else "")
+                 + "\nIf I have studied those units, recall the shared ideas in a sentence or two instead of teaching them again, and"
+                   " spend this session on what these excerpts add, explain differently or disagree about. If I have not, teach everything.\n\n")
+    return block + about_me_block(profile)
+
+
 def _response(db: Session, topic: Topic, row: TopicDetail, payload: dict, tutor: str, *, cached: bool) -> dict:
     out = {"node_id": topic.node_id, "title": topic.title, "purpose": topic.purpose, "status": row.status, "depth": topic.depth,
            "budget_tokens": row.budget_tokens, "trail": topic.chain, "next": topic.next, "cached": cached,
            "children": None, **{key: value for key, value in payload.items() if key != "split_key"}}
+    out["overlaps"], out["new_ideas"] = shown(topic.overlaps, topic.new_ideas)
     if "study_text" in out:
-        out["study_text"] = out["study_text"].replace(TUTOR_PLACEHOLDER, TUTOR_NAMES.get(tutor, "any AI tutor"))
+        profile = get_profile(db)
+        head, heading, excerpts = out["study_text"].partition(EXCERPTS_HEADING)
+        head = _fill(head, TUTOR_PLACEHOLDER, TUTOR_NAMES.get(tutor, "any AI tutor"))
+        head = _fill(head, PRACTICE_PLACEHOLDER, practice_instruction(profile))
+        head = _fill(head, CONTEXT_PLACEHOLDER + "## Tutor instructions", _context(profile, out["overlaps"], out["new_ideas"]) + "## Tutor instructions")
+        out["study_text"] = head + heading + excerpts
+        out["estimated_tokens"] = estimate_tokens(out["study_text"])
     if row.status == "split":
         children = _children(db, topic.scope, topic.node_id, row.budget_tokens)
         passages = {child.node_id: json.loads(child.chunk_ids_json or "[]") for child in children}

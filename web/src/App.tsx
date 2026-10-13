@@ -1,6 +1,6 @@
 import {useEffect,useMemo,useRef,useState,type FormEvent,type KeyboardEvent,type ReactNode} from "react"
 import {Brain,Check,ChevronDown,ChevronRight,Copy,Download,FileText,FolderOpen,GraduationCap,Library,LoaderCircle,MessageSquare,Paperclip,Plus,RefreshCw,Send,Sparkles,Trash2,UploadCloud,X} from "lucide-react"
-import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type PasteFormat,type MasterPrompt,type PlanStatus,type PreparedTopic,type SessionSize,type Source,type StudyPackExport} from "./lib/api"
+import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type PasteFormat,type MasterPrompt,type PlanStatus,type PreparedTopic,type Profile,type SessionSize,type Source,type StudyPackExport} from "./lib/api"
 import LearnView from "./Learn"
 
 type View="chat"|"library"|"plan"|"learn"
@@ -401,6 +401,10 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
   // Parts are made for one session size, so a new size starts again from the plan topic.
   const changeSize=(size:SessionSize)=>{setSessionSize(size);const root=pendingUnit?(pendingUnit.trail[0]?.node_id??pendingUnit.nodeId):unitTrail[0]?.node_id;/* the latest choice wins */setUnitTrail([]);if(root)void openUnit(root,[],{size})}
   // The tutor only changes a name in the text; a topic divided into parts has no text.
+  // "About you" changed: what is added to the open unit and the master prompt changes with it.
+  // Called after the save returns, through a ref, so it sees what is open (or still loading) by then.
+  const contextChanged=()=>{setMasterTick(tick=>tick+1);if(pendingUnit){void openUnit(pendingUnit.nodeId,pendingUnit.trail,{tutor,retry:false});return}if(currentUnit&&currentUnit.status!=="split")void openUnit(currentUnit.node_id,unitTrail.slice(0,-1),{retry:false})}
+  const contextChangedRef=useRef(contextChanged);contextChangedRef.current=contextChanged
   const changeTutor=(name:string)=>{setTutor(name);if(pendingUnit){void openUnit(pendingUnit.nodeId,pendingUnit.trail,{tutor:name,retry:false});return}if(currentUnit&&currentUnit.status!=="split")void openUnit(currentUnit.node_id,unitTrail.slice(0,-1),{tutor:name,retry:false})}
   const outline=planNodes
   const topicOptions=outline.filter(item=>item.kind==="study").map(item=>item.topic)
@@ -469,6 +473,7 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
           {currentUnit.purpose&&<p className="plan-help">{currentUnit.purpose}</p>}
           {currentUnit.warning&&<p className="plan-warning" role="status">{currentUnit.warning}</p>}
           {currentUnit.note&&<p className="plan-warning" role="status">{currentUnit.note}</p>}
+          {currentUnit.overlaps&&currentUnit.overlaps.length>0&&<p className="plan-help overlap-note">Shares key ideas with {currentUnit.overlaps.map(item=>`“${item.title}”`).join(" and ")}: {Array.from(new Set(currentUnit.overlaps.flatMap(item=>item.shared))).slice(0,4).join(", ")}. Your tutor recaps those briefly and spends the session on what is new{currentUnit.new_ideas&&currentUnit.new_ideas.length?` (${currentUnit.new_ideas.slice(0,4).join(", ")})`:""}.</p>}
           <div className="study-actions"><CopyAnswer text={currentUnit.study_text||""} label="Copy for your AI tutor" primary/>{currentUnit.next?<Button onClick={()=>void doneAndNext()}>{unitDone?(nextLabel.replace("Done · ","Go to ")):nextLabel}</Button>:planNext?<Button onClick={()=>void finishAndGo()}>{unitDone?"Next":"Done · next"}: {planNext.title}</Button>:<Button variant="outline" disabled={unitDone} onClick={()=>void markDone(currentUnit.node_id,currentUnit.title,true)}>{unitDone?"Studied":"Mark as studied"}</Button>}</div>
           <p className="plan-help">Paste it into ChatGPT, Claude or Gemini and study there. When you finish, write “unit done” in that chat for a recap and review questions.{currentUnit.next?` Next: ${currentUnit.next.title}.`:planNext?"":unitDone?" You have studied every topic in this plan.":currentUnit.depth?" This is the last part of this learning path.":" This is the last topic of this learning path."}</p>
           <div className="study-secondary"><Button variant="ghost" onClick={()=>downloadText(`${fileSlug(currentUnit.title)}.md`,currentUnit.study_text||"")}><Download size={14}/>Download</Button>{unitDone&&<button className="text-link" onClick={()=>void markDone(currentUnit.node_id,currentUnit.title,false)}>Mark as not studied</button>}</div>
@@ -499,6 +504,7 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
         {(relationshipInfo.sources.length>0||relationshipInfo.shared_foundations.length>0)&&<details className="outline-markdown"><summary>How LearnOS grouped your sources</summary><div className="plan-help">Source identity is inferred and may be uncertain. Shared topics alone do not establish that sources belong to one course.</div>{relationshipInfo.sources.map((r:any,index:number)=><p key={`${r.source_a_id}-${r.source_b_id}-${index}`}>Source {r.source_a_id} + source {r.source_b_id}: <strong>{String(r.relation_type||"").replaceAll("_"," ")}</strong> ({Math.round(Number(r.confidence||0)*100)}% confidence). {r.rationale}</p>)}{relationshipInfo.shared_foundations.length>0&&<p>Shared foundations: {relationshipInfo.shared_foundations.join(", ")}</p>}</details>}
         <details className="outline-markdown"><summary>The whole plan as text</summary><div className="plan-actions"><CopyAnswer text={syllabus}/></div><div className="plan-syllabus"><MarkdownText text={syllabus}/></div></details>
       </div>
+      <details className="plan-section optional-section"><summary><strong>Tell your tutor about you</strong><span>Optional. Your background, goal and how you like to practise are added to every study session you copy, so the tutor pitches it right.</span></summary><AboutYou saved={()=>contextChangedRef.current()}/></details>
       <details className="plan-section optional-section"><summary><strong>Using a ChatGPT or Claude Project, or a Gemini Gem?</strong><span>Optional. Each study session already works on its own; this gives your tutor the whole plan once.</span></summary>
         {masterError&&<p className="plan-error" role="alert">{masterError}</p>}
         {masterPrompt&&<><p className="plan-help">{TUTOR_SETUP[tutor]||TUTOR_SETUP.general} It lists your whole plan and your progress ({masterPrompt.completed} of {plural(masterPrompt.topics,"topic")} studied), so update it now and then.</p>
@@ -711,6 +717,23 @@ function PasteTextForm({label,onSave,onCancel}:{label:string;onSave:(text:string
     <label className="field-label">{label}<textarea className="text-input paste-input" value={text} onChange={event=>setText(event.target.value)} placeholder="Paste the text here…" autoFocus/></label>
     <div className="paste-form-actions"><select className="text-input" aria-label="Text format" value={format} onChange={event=>setFormat(event.target.value as PasteFormat)}><option value="plain">Plain text</option><option value="srt">SRT subtitles</option><option value="vtt">VTT subtitles</option></select><Button type="submit" disabled={busy||!text.trim()}>{busy?<><LoaderCircle size={14}/>Saving…</>:"Save and index"}</Button><Button variant="ghost" onClick={onCancel}>Cancel</Button></div>
     {error&&<p className="dialog-error" role="alert">{error}</p>}
+  </form>
+}
+
+function AboutYou({saved}:{saved:()=>void}){
+  const[profile,setProfile]=useState<Profile>({background:"",goal:"",practice:"questions"})
+  // "failed": what was saved could not be read, so saving is held back rather than replacing it with blanks.
+  const[state,setState]=useState<"loading"|"failed"|"idle"|"saving"|"saved">("loading")
+  const[error,setError]=useState("")
+  const[attempt,setAttempt]=useState(0)
+  useEffect(()=>{let current=true;setState("loading");setError("");api.profile().then(result=>{if(current){setProfile(result);setState("idle")}}).catch(()=>{if(current){setState("failed");setError("What you told your tutor could not be loaded.")}});return()=>{current=false}},[attempt])
+  const edit=(change:Partial<Profile>)=>{setProfile(previous=>({...previous,...change}));if(state==="saved")setState("idle")}
+  const save=async(event:FormEvent)=>{event.preventDefault();setState("saving");setError("");try{setProfile(await api.saveProfile(profile));setState("saved");saved()}catch(e){setError(e instanceof Error?e.message:"Could not save");setState("idle")}}
+  return <form className="about-form" onSubmit={event=>void save(event)}>
+    <label>Your background<textarea className="text-input" rows={2} maxLength={600} value={profile.background} placeholder="For example: MSc in data science, comfortable with Python and machine learning" onChange={event=>edit({background:event.target.value})}/></label>
+    <label>Your goal<input className="text-input" maxLength={300} value={profile.goal} placeholder="For example: build and evaluate AI agents" onChange={event=>edit({goal:event.target.value})}/></label>
+    <label>How you like to practise<select className="text-input" value={profile.practice} onChange={event=>edit({practice:event.target.value as Profile["practice"]})}><option value="questions">Check questions</option><option value="coding">Small coding tasks</option><option value="both">Both</option></select></label>
+    <div className="plan-actions"><Button type="submit" disabled={state==="loading"||state==="saving"||state==="failed"}>{state==="saving"?"Saving…":"Save"}</Button>{state==="saved"&&<span className="plan-help" role="status">Saved. It is added to every study session you copy.</span>}{error&&<span className="plan-error" role="alert">{error}{state==="failed"&&<> <button type="button" className="link-button" onClick={()=>setAttempt(value=>value+1)}>Try again</button></>}</span>}</div>
   </form>
 }
 

@@ -372,3 +372,13 @@ class QuizItem(Base):
     reference_answer: Mapped[str] = mapped_column(Text)
     evidence_chunk_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class LearnerProfile(Base):
+    """What the learner tells their tutor about themselves; a single row (id 1). See services.profile."""
+    __tablename__ = "learner_profile"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    background: Mapped[str | None] = mapped_column(Text, nullable=True)
+    goal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    practice: Mapped[str | None] = mapped_column(String(20), nullable=True)  # questions | coding | both
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

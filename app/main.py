@@ -21,6 +21,7 @@ from .services.curriculum import build_study_pack_prompt, build_external_study_p
 from .services.plans import read_plan, request_updates_after_change
 from .services.units import OutlineTopic, StaleTopic, TopicNotFound, prepare_topic, topic_lock
 from .services.handoff import NoPlan, master_prompt
+from .services.profile import get_profile, profile_json, save_profile
 from .services.progress import plan_topic_of, roll_up, save_progress
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
 from .services.spaces import also_in, in_space, spaces_of
@@ -1085,6 +1086,25 @@ def plan_master_prompt(course_id: int | None = None, tutor: Literal["general", "
             return master_prompt(db, course_id, tutor, path_id)
         except NoPlan:
             raise HTTPException(404, "There is no study plan for this space yet")
+
+
+class ProfileRequest(BaseModel):
+    background: str = Field(default="", max_length=2000)
+    goal: str = Field(default="", max_length=1000)
+    practice: Literal["questions", "coding", "both"] = "questions"
+
+
+@app.get("/profile")
+def read_profile():
+    """What the learner told their tutor about themselves; added to every study unit when it is copied."""
+    with session_scope() as db:
+        return profile_json(get_profile(db))
+
+
+@app.put("/profile")
+def update_profile(req: ProfileRequest):
+    with session_scope() as db:
+        return profile_json(save_profile(db, req.background, req.goal, req.practice))
 
 
 def _study_scope(course_id: int | None) -> str:
