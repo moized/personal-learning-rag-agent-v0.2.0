@@ -406,5 +406,7 @@ class PlanArrangement(Base):
     sessions_json: Mapped[str] = mapped_column(Text)
     # {session id: [topic ids marked studied because the session was]}: un-marking it un-marks only those
     ticked_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # When the learner last applied an answer (updated_at also changes when progress is kept in step).
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

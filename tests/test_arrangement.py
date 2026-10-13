@@ -193,3 +193,40 @@ def test_a_combined_session_lists_every_idea_it_teaches_for_the_first_time(uenv)
     unit = _prepare(uenv, course_id, group_id(["t-1", "t-2"])).json()
     assert [item["title"] for item in unit["overlaps"]] == ["Topic A"]
     assert {"R", "S", "T"} <= set(unit["new_ideas"]) and not {"P", "Q"} & set(unit["new_ideas"])
+
+
+LATER_FIRST = [{"topics": ["T2", "T3"], "title": "Brand and loop", "why": "First.", "optional": False},
+               {"topics": ["T1"], "title": "Loop", "why": "Then.", "optional": False}]
+
+
+def test_an_applied_arrangement_starts_from_its_first_session_not_from_a_topic_opened_before(uenv):
+    course_id = _three(uenv)
+    _prepare(uenv, course_id, "t-0")  # the learner opened the plan's first topic, then arranged the plan
+    _arrange(uenv, course_id, LATER_FIRST)
+    first = group_id(["t-1", "t-2"])
+    prompt = uenv.client.get("/plan/master-prompt", params={"course_id": course_id}).json()
+    assert prompt["next_topic"]["id"] == first and "I have not started yet. The first topic is: Brand and loop." in prompt["text"]
+    assert uenv.client.get("/study-progress", params={"course_id": course_id}).json()["position"] is None
+    unit = _prepare(uenv, course_id, first).json()  # session 1: every topic assigned to it, in one unit
+    own = unit["study_text"].split("## Source excerpts")[1].split("## Related material")[0]
+    assert BRAND in own and AGAIN in own and LOOP not in own and unit["next"]["id"] == "t-0"
+    assert uenv.client.get("/study-progress", params={"course_id": course_id}).json()["position"]["trail"] == [first]
+    # Keeping progress in step updates the arrangement row; a session opened after applying still counts.
+    _tick(uenv, course_id, "t-0", "Agent Loop")
+    assert uenv.client.get("/plan/master-prompt", params={"course_id": course_id}).json()["next_topic"]["id"] == first
+
+
+def test_reopening_the_same_topic_after_arranging_counts_as_where_the_learner_is(uenv):
+    course_id = _three(uenv)
+    _prepare(uenv, course_id, "t-0")
+    _arrange(uenv, course_id, LATER_FIRST)
+    _prepare(uenv, course_id, "t-0")  # the learner chose to continue it anyway
+    assert uenv.client.get("/plan/master-prompt", params={"course_id": course_id}).json()["next_topic"]["id"] == "t-0"
+
+
+def test_topics_the_plan_gains_after_arranging_are_flagged_so_the_learner_can_ask_again(uenv):
+    course_id = _three(uenv)
+    _arrange(uenv, course_id, [{"topics": ["T1", "T3"], "title": "Loops"}])
+    sessions = uenv.client.get("/syllabus", params={"course_id": course_id}).json()["sessions"]
+    assert [(s["topics"], s["added"]) for s in sessions] == [(["t-0", "t-2"], False), (["t-1"], True)]
+    assert _request(uenv, course_id)["topics"] == 3  # a new request lists every topic, so the AI can place the new one

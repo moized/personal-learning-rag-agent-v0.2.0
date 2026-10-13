@@ -7,11 +7,12 @@ size are; un-ticking a part re-opens the topics above it unless they are still c
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import StudyPlan, StudyPlanNode, StudyPosition, StudyProgress, TopicDetail
+from ..models import PlanArrangement, StudyPlan, StudyPlanNode, StudyPosition, StudyProgress, TopicDetail
 
 
 def topic_key(title: str) -> str:
@@ -134,6 +135,7 @@ def remember_position(db: Session, scope: str, node_id: str, budget: int, title:
         row = StudyPosition(scope_key=scope)
         db.add(row)
     row.node_id, row.trail_json, row.budget_tokens, row.title = node_id, json.dumps(trail), budget, title[:500]
+    row.updated_at = datetime.now(UTC)  # every visit counts, also of the same session again
     db.flush()
 
 
@@ -146,10 +148,21 @@ def _is_session(db: Session, scope: str, node_id: str) -> bool:
     return any(session.id == node_id for session in sessions(db, plan))
 
 
+def _utc(moment):
+    """Stored times are UTC without a zone; ones not yet read back from the database carry it."""
+    return moment.replace(tzinfo=None) if moment is not None and moment.tzinfo is not None else moment
+
+
 def current_position(db: Session, scope: str) -> dict | None:
-    """The session the learner opened last, while it is still in the plan and not yet studied."""
+    """The session the learner opened last, while it is still in the plan and not yet studied. A session
+    opened before the learner applied an arrangement belongs to the plan's earlier order: the arranged
+    plan starts from its first session not yet studied instead."""
     row = db.execute(select(StudyPosition).where(StudyPosition.scope_key == scope)).scalar_one_or_none()
     if row is None:
+        return None
+    arranged = db.execute(select(PlanArrangement).where(PlanArrangement.scope_key == scope)).scalar_one_or_none()
+    applied = _utc(arranged.applied_at or arranged.created_at) if arranged is not None else None
+    if applied is not None and row.updated_at is not None and _utc(row.updated_at) < applied:
         return None
     try:
         trail = [str(node_id) for node_id in json.loads(row.trail_json or "[]")]

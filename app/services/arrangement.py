@@ -18,6 +18,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -47,6 +48,9 @@ class StudySession:
     title: str
     why: str
     optional: bool
+    # A topic the plan gained after the learner's AI arranged it (new material, or a rebuild that changed
+    # topics): it gets a session of its own until the learner asks their AI again.
+    added: bool = False
 
     @property
     def together(self) -> bool:
@@ -103,7 +107,7 @@ def sessions(db: Session, plan: StudyPlan | None) -> list[StudySession]:
         else:
             title = _line(item.get("title"), 200) or " + ".join(by_id[t].title for t in members)
             out.append(StudySession(group_id(members), members, title, _line(item.get("why"), 300), optional))
-    out += [StudySession(node.node_id, (node.node_id,), node.title, "", False) for node in study if node.node_id not in used]
+    out += [StudySession(node.node_id, (node.node_id,), node.title, "", False, added=True) for node in study if node.node_id not in used]
     return [s for s in out if not s.optional] + [s for s in out if s.optional]  # the core first
 
 
@@ -115,7 +119,8 @@ def session_payload(db: Session, plan: StudyPlan | None) -> list[dict] | None:
     """The arranged sessions in API form, or None while the plan keeps its own order."""
     if plan is None or not is_arranged(db, plan.scope_key):
         return None
-    return [{"id": s.id, "topics": list(s.topics), "title": s.title, "why": s.why, "optional": s.optional} for s in sessions(db, plan)]
+    return [{"id": s.id, "topics": list(s.topics), "title": s.title, "why": s.why, "optional": s.optional, "added": s.added}
+            for s in sessions(db, plan)]
 
 
 # ------------------------------------------------------------------------ request
@@ -259,6 +264,7 @@ def apply_reply(db: Session, course_id: int | None, reply: str) -> dict:
         row = PlanArrangement(scope_key=scope)
         db.add(row)
     row.sessions_json = json.dumps(saved, ensure_ascii=False)
+    row.applied_at = datetime.now(UTC)  # where the learner left off before this belongs to the earlier order
     db.flush()
     arranged = sessions(db, plan)
     _reconcile(db, scope, row, arranged)

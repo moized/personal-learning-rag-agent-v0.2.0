@@ -452,7 +452,10 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
     :processingCount||!readyCount||planStatus==="updating"||planStatus==="outdated"?"preparing"
     :!aiReady?"no-ai":"no-topics"
   // The next topic: from the plan's reading order once known, else the first unstudied topic.
-  const nextTopic=masterPrompt?masterPrompt.next_topic:(()=>{const item=studyItems.find(entry=>!isDone(entry));return item?{id:item.id,title:item.topic,partly_done:partlyIds.has(item.id)}:null})()
+  // Until the master prompt is read (or if it cannot be), what is next follows the arranged sessions, or the plan's order.
+  const nextTopic=masterPrompt?masterPrompt.next_topic:(()=>{
+    if(sessions?.length){const open=sessions.find(session=>!session.topics.every(id=>{const item=studyItems.find(entry=>entry.id===id);return !item||isDone(item)}));return open?{id:open.id,title:open.title,partly_done:partlyIds.has(open.id)}:null}
+    const item=studyItems.find(entry=>!isDone(entry));return item?{id:item.id,title:item.topic,partly_done:partlyIds.has(item.id)}:null})()
   const nextNode=nextTopic?outline.find(item=>item.id===nextTopic.id):undefined
   const nextSession=nextTopic?(sessions||[]).find(session=>session.id===nextTopic.id&&session.topics.length>1):undefined
   const started=Boolean(masterPrompt?.started||studiedCount)
@@ -735,6 +738,7 @@ function PasteTextForm({label,onSave,onCancel}:{label:string;onSave:(text:string
 }
 
 function OrganizeWithAI({courseId,planKey,arranged,changed}:{courseId?:number;planKey:string;arranged:PlanSession[]|null;changed:()=>void}){
+  const added=(arranged||[]).filter(session=>session.added).length
   const[request,setRequest]=useState("")
   const[reply,setReply]=useState("")
   const[busy,setBusy]=useState(false)
@@ -753,6 +757,7 @@ function OrganizeWithAI({courseId,planKey,arranged,changed}:{courseId?:number;pl
         <form onSubmit={event=>void apply(event)}><textarea className="text-input" rows={4} value={reply} placeholder="Paste your AI's answer" aria-label="Your AI's answer" onChange={event=>setReply(event.target.value)}/><div className="plan-actions"><Button type="submit" disabled={busy||!reply.trim()}>{busy?"Applying…":"Apply"}</Button></div></form></li>
     </ol>
     {arranged&&<p className="plan-help">Your plan follows your AI's arrangement ({plural(arranged.length,"session")}). <button className="link-button" disabled={busy} onClick={()=>void reset()}>Go back to LearnOS's order</button></p>}
+    {added>0&&<p className="plan-warning" role="status">{added===1?"1 topic was":`${added} topics were`} added to your plan since your AI arranged it. {added===1?"It comes":"They come"} after your sessions, each on {added===1?"its":"their"} own. Copy the request again and apply the new answer to have your AI place {added===1?"it":"them"}.</p>}
     {result&&<p className="plan-help" role="status">{result}</p>}
     {error&&<p className="plan-error" role="alert">{error}</p>}
   </div>
