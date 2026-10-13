@@ -36,6 +36,7 @@ def _migrate_sqlite() -> None:
         return
     source_columns = {c["name"] for c in inspect(engine).get_columns("sources")} if "sources" in inspect(engine).get_table_names() else set()
     _add_missing_columns("courses", {"created_by": "created_by VARCHAR(20)"})
+    _add_missing_columns("plan_arrangements", {"ticked_json": "ticked_json TEXT"})
     _add_missing_columns("sources", {
         "curriculum_json": "curriculum_json TEXT",
         "curriculum_hash": "curriculum_hash VARCHAR(64)",

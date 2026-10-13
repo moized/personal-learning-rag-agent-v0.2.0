@@ -22,6 +22,8 @@ from .services.plans import read_plan, request_updates_after_change, scope_key
 from .services.units import SESSION_SIZES, OutlineTopic, StaleTopic, TopicNotFound, prepare_topic, topic_lock
 from .services.handoff import NoPlan, master_prompt
 from .services.profile import get_profile, profile_json, save_profile
+from .services.arrangement import ArrangementError, NoTopics, apply_reply, clear as clear_arrangement, done_sessions, organize_request, \
+    session_payload, sync_progress
 from .services.progress import current_position, plan_topic_of, remember_position, roll_up, save_progress
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
 from .services.spaces import also_in, in_space, spaces_of
@@ -1008,7 +1010,10 @@ def syllabus(course_id: int | None = None, regenerate: bool = False):
     """The saved study plan and its status. Never calls the AI: plans are built in the
     background when their content changes, or when `regenerate` asks for a rebuild."""
     with session_scope() as db:
-        return read_plan(db, course_id, regenerate=regenerate)
+        result = read_plan(db, course_id, regenerate=regenerate)
+        plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == _study_scope(course_id))).scalar_one_or_none()
+        result["sessions"] = session_payload(db, plan)  # how the learner's AI arranged it, or None
+        return result
 
 
 @app.post("/study-pack")
@@ -1097,6 +1102,40 @@ class ProfileRequest(BaseModel):
     practice: Literal["questions", "coding", "both"] = "questions"
 
 
+@app.get("/plan/organize-request")
+def plan_organize_request(course_id: int | None = None):
+    """A request the learner pastes into their own AI to arrange the plan into study sessions; no AI call here."""
+    with session_scope() as db:
+        try:
+            return organize_request(db, course_id)
+        except NoTopics:
+            raise HTTPException(404, "There is no study plan for this space yet")
+
+
+class ArrangementRequest(BaseModel):
+    course_id: int | None = None
+    reply: str = Field(min_length=1, max_length=200_000)
+
+
+@app.post("/plan/arrangement")
+def save_plan_arrangement(req: ArrangementRequest):
+    """Apply the study sessions the learner's AI suggested."""
+    with session_scope() as db:
+        try:
+            return apply_reply(db, req.course_id, req.reply)
+        except NoTopics:
+            raise HTTPException(404, "There is no study plan for this space yet")
+        except ArrangementError as exc:
+            raise HTTPException(422, str(exc))
+
+
+@app.delete("/plan/arrangement")
+def delete_plan_arrangement(course_id: int | None = None):
+    """Back to the plan's own order: every topic a session of its own."""
+    with session_scope() as db:
+        return {"deleted": clear_arrangement(db, course_id)}
+
+
 @app.get("/profile")
 def read_profile():
     """What the learner told their tutor about themselves; added to every study unit when it is copied."""
@@ -1146,9 +1185,12 @@ def study_progress(course_id: int | None = None):
 def update_study_progress(req: StudyProgressRequest):
     scope = _study_scope(req.course_id)
     with session_scope() as db:
+        plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope)).scalar_one_or_none()
+        before = done_sessions(db, scope, plan)
         save_progress(db, scope, req.topic, req.topic_id, req.completed)
         if req.topic_id:
             roll_up(db, scope, req.topic_id, req.completed)
+        sync_progress(db, scope, plan, before)  # topics studied together and their session stay in step
         return {"topic": req.topic, "completed": req.completed}
 
 

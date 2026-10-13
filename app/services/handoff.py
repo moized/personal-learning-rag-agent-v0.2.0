@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Course, StudyPlan, StudyPlanNode, StudyProgress
+from .arrangement import is_arranged, sessions as arranged_sessions
 from .coverage import plan_coverage, shown
 from .plans import reading_order, scope_key
 from .profile import about_me_lines, get_profile, missing, practice_instruction
@@ -89,6 +91,22 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
     if resume is not None and not done(resume):
         upcoming = resume
         started.add(resume.node_id)
+    # A plan the learner had their AI arrange (see arrangement) is studied session by session.
+    arranged = arranged_sessions(db, plan) if path_id is None and is_arranged(db, scope) else []
+    in_group = {topic: session for session in arranged if session.together for topic in session.topics}
+    optional = {topic for session in arranged if session.optional for topic in session.topics}
+
+    def session_done(session) -> bool:
+        return all(done(by_id[topic]) for topic in session.topics if topic in by_id)
+
+    if arranged:
+        at = position["trail"][0] if position else None
+        current = next((s for s in arranged if at and (s.id == at or at in s.topics) and not session_done(s)), None)
+        if current is not None:
+            started.add(current.id)
+        current = current or next((s for s in arranged if not session_done(s)), None)
+        upcoming = None if current is None else SimpleNamespace(
+            node_id=current.id, title=current.title, path_id=None if current.together else by_id[current.topics[0]].path_id)
 
     course = db.get(Course, course_id) if course_id is not None else None
     space = _flat(course.name) if course else "All my sources"
@@ -124,6 +142,10 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
                 line += f": {purpose}"
             if overlaps(node):
                 line += f" [overlaps: {'; '.join(_flat(item['title'], 120) for item in overlaps(node))}]"
+            if node.node_id in in_group:
+                line += f" [studied together: {_flat(in_group[node.node_id].title, 120)}]"
+            if node.node_id in optional:
+                line += " [optional]"
             if node.node_type == "study" and done(node):
                 line += " [done]"
             elif node.node_id in started:
@@ -138,7 +160,8 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
         goals.append(f"- {title}" + (f": {goal}" if goal and goal != title else ""))
     in_path = ""
     if upcoming is not None and len(paths) > 1:
-        in_path = f" (in {_flat(next((p.title for p in paths if p.node_id == upcoming.path_id), ''))})"
+        path_title = next((p.title for p in paths if p.node_id == upcoming.path_id), "")
+        in_path = f" (in {_flat(path_title)})" if path_title else ""
     if upcoming is None and study:
         where = f"I have studied all {len(study)} topics of this plan. Help me review: ask me questions across the whole plan."
         ready = "tell me you are ready to help me review"
@@ -168,6 +191,10 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
         rules.append("Some topics share key ideas with an earlier topic from another source (marked [overlaps: ...] above; the unit lists"
                      " the shared ideas). If I have studied the earlier one, recall the shared ideas briefly and spend the session on what"
                      " is new or different, including where the sources disagree. If I have not, teach everything.")
+    if any(session.together for session in arranged):
+        rules.append('I study the plan in the sessions listed under "My study sessions". A session that combines topics comes as one'
+                     " unit with all their excerpts: teach them as one connected picture, and compare the sources when it draws on more"
+                     " than one.")
     rules += [
         "Stay within the unit. If I am missing something from earlier in the plan, explain it briefly and come back.",
         f'When I write "{DONE_WORDS}", give me a recap of the unit in at most five bullet points and three review questions'
@@ -182,6 +209,15 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
     opener = (f"reply with a two-sentence summary of it, ask me in one short question about {' and '.join(ask)}, and {ready}" if ask
               else f"reply with a two-sentence summary of it and {ready}")
 
+    session_lines = []
+    for number, session in enumerate(arranged, 1):
+        line = f"{number}. {_flat(session.title)}"
+        if session.together:
+            line += ": " + " + ".join(_flat(by_id[topic].title, 120) for topic in session.topics if topic in by_id)
+        line += (" [optional]" if session.optional else "") + (" [done]" if session_done(session) else "")
+        session_lines.append(line)
+    sessions_section = ("\n\n## My study sessions, in order\n" + "\n".join(session_lines)) if session_lines else ""
+
     def compose(detailed: bool) -> str:
         return f"""# My study plan: {space}
 
@@ -192,7 +228,7 @@ I am learning from my own materials. A tool called LearnOS organized them into t
 {chr(10).join(goals) or "- The material in this plan."}
 
 ## The plan, in order
-{outline(detailed)}
+{outline(detailed)}{sessions_section}
 
 ## How each session works
 {chr(10).join(f"{number}. {rule}" for number, rule in enumerate(rules, 1))}

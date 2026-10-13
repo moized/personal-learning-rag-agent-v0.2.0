@@ -395,3 +395,16 @@ class StudyPosition(Base):
     budget_tokens: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(500))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class PlanArrangement(Base):
+    """How the learner's own AI arranged a scope's plan topics into study sessions (see services.arrangement)."""
+    __tablename__ = "plan_arrangements"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope_key: Mapped[str] = mapped_column(String(80), unique=True)
+    # [{"topics": [plan topic ids], "title", "why", "optional"}], in study order
+    sessions_json: Mapped[str] = mapped_column(Text)
+    # {session id: [topic ids marked studied because the session was]}: un-marking it un-marks only those
+    ticked_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

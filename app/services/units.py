@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Chunk, Concept, Course, Document, Evidence, Section, Source, StudyPlan, StudyPlanNode, TopicDetail
 from ..providers.base import AIProvider
+from .arrangement import GROUP_PREFIX, StudySession, done_sessions, is_arranged, sessions as plan_sessions, sync_progress
 from .coverage import Coverage, narrowed, plan_coverage, shown
 from .plans import reading_order, scope_key
 from .profile import about_me_block, get_profile, practice_instruction
@@ -115,10 +116,23 @@ class Topic:
     # newly read key ideas never make it stale.
     overlaps: list[dict] = field(default_factory=list)
     new_ideas: list[str] = field(default_factory=list)
+    # A session of topics studied together (see arrangement): each topic, with the source it comes from,
+    # and how many different sources they come from.
+    together: list[str] = field(default_factory=list)
+    together_sources: int = 0
+
+
+def _following(arranged: list[StudySession], node_id: str) -> dict | None:
+    """In an arranged plan, what comes after the session that is or holds `node_id`."""
+    for index, session in enumerate(arranged):
+        if session.id == node_id or node_id in session.topics:
+            following = arranged[index + 1] if index + 1 < len(arranged) else None
+            return {"id": following.id, "title": following.title, "depth": 0} if following is not None else None
+    return None
 
 
 def _plan_topic(nodes: dict[str, StudyPlanNode], order: list[str], node: StudyPlanNode, scope: str, plan: StudyPlan,
-                coverage: Coverage) -> Topic:
+                coverage: Coverage, arranged: list[StudySession] | None = None) -> Topic:
     meta = json.loads(node.metadata_json or "{}")
     chain: list[str] = []
     parent = nodes.get(node.parent_node_id) if node.parent_node_id else None
@@ -135,6 +149,8 @@ def _plan_topic(nodes: dict[str, StudyPlanNode], order: list[str], node: StudyPl
     position = study.index(node.node_id) if node.node_id in study else -1
     following = nodes[study[position + 1]] if 0 <= position < len(study) - 1 else None
     next_item = {"id": following.node_id, "title": following.title, "depth": 0} if following is not None else None
+    if arranged is not None:  # the learner's arrangement decides what comes next
+        next_item = _following(arranged, node.node_id)
     next_title = next_item["title"] if next_item else None
     purpose = str(meta.get("purpose") or "")
     prerequisites = str(meta.get("prerequisites") or "")
@@ -145,6 +161,42 @@ def _plan_topic(nodes: dict[str, StudyPlanNode], order: list[str], node: StudyPl
     return Topic(scope=scope, plan=plan, node_id=node.node_id, title=node.title, purpose=purpose, depth=0, section_ids=section_ids,
                  chunk_ids=chunk_ids, chain=chain, objective=objective, prerequisites=prerequisites, next=next_item, version=version,
                  overlaps=coverage.overlaps.get(node.node_id, []), new_ideas=coverage.new_ideas.get(node.node_id, []))
+
+
+def _session_topic(db: Session, nodes: dict[str, StudyPlanNode], session: StudySession, scope: str, plan: StudyPlan,
+                   coverage: Coverage, arranged: list[StudySession]) -> Topic:
+    """Topics studied together: one session with all their passages, topic after topic."""
+    section_ids: list[int] = []
+    chunk_ids: list[int] = []
+    together: list[str] = []
+    for topic_id in session.topics:
+        member = nodes[topic_id]
+        sections = [s for s in json.loads(member.metadata_json or "{}").get("section_ids") or [] if isinstance(s, int)]
+        section_ids += [s for s in sections if s not in section_ids]
+        own = coverage.passages.get(topic_id)
+        if own is None:
+            own = db.execute(select(Chunk.id).join(Section, Chunk.section_id == Section.id)
+                             .where(Chunk.section_id.in_(sections), Chunk.chunk_kind == "leaf")
+                             .order_by(Section.source_id, Section.position, Chunk.document_id, Chunk.chunk_index)).scalars().all() if sections else []
+        chunk_ids += [chunk_id for chunk_id in own if chunk_id not in chunk_ids]
+        names = coverage.sources.get(topic_id, [])
+        together.append(f"{member.title} (from {', '.join(names)})" if names else member.title)
+    merged: dict[str, dict] = {}  # earlier topics outside this session that its topics overlap
+    for topic_id in session.topics:
+        for item in coverage.overlaps.get(topic_id, []):
+            if item["id"] in session.topics:
+                continue
+            entry = merged.setdefault(item["id"], {**item, "shared": []})
+            entry["shared"] += [idea for idea in item["shared"] if idea not in entry["shared"]]
+    met = {idea for item in merged.values() for idea in item["shared"]}  # met before, in topics outside the session
+    new_ideas = list(dict.fromkeys(idea for topic_id in session.topics for idea in coverage.ideas.get(topic_id, []) if idea not in met))
+    next_item = _following(arranged, session.id)
+    version = _digest([PACK_FORMAT, plan.revision, session.id, session.title, session.why, section_ids, chunk_ids, together,
+                       next_item["title"] if next_item else None])
+    return Topic(scope=scope, plan=plan, node_id=session.id, title=session.title, purpose=session.why, depth=0, section_ids=section_ids,
+                 chunk_ids=chunk_ids, chain=[], objective="", prerequisites="", next=next_item, version=version,
+                 overlaps=sorted(merged.values(), key=lambda item: -len(item["shared"])), new_ideas=new_ideas, together=together,
+                 together_sources=len({name for topic_id in session.topics for name in coverage.sources.get(topic_id, [])}))
 
 
 def _detail(db: Session, scope: str, node_id: str, budget: int) -> TopicDetail | None:
@@ -159,17 +211,24 @@ def _children(db: Session, scope: str, parent_id: str, budget: int) -> list[Topi
 
 
 def find_topic(db: Session, course_id: int | None, node_id: str, budget: int) -> Topic:
-    """A study topic of the plan, or a part made when a topic was split for this session size."""
+    """A study topic of the plan, a session of topics studied together, or a part made when one of them
+    was split for this session size."""
     scope = scope_key(course_id)
     plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope)).scalar_one_or_none()
     if plan is None:
         raise TopicNotFound(node_id)
     rows = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
     nodes = {row.node_id: row for row in rows}
+    arranged = plan_sessions(db, plan) if is_arranged(db, scope) else None
     if node_id in nodes:
         if nodes[node_id].node_type != "study":
             raise OutlineTopic(node_id)
-        return _plan_topic(nodes, [row.node_id for row in reading_order(rows)], nodes[node_id], scope, plan, plan_coverage(db, plan))
+        return _plan_topic(nodes, [row.node_id for row in reading_order(rows)], nodes[node_id], scope, plan, plan_coverage(db, plan),
+                           arranged)
+    if node_id.startswith(GROUP_PREFIX) and arranged is not None:
+        session = next((s for s in arranged if s.id == node_id and s.together), None)
+        if session is not None:
+            return _session_topic(db, nodes, session, scope, plan, plan_coverage(db, plan), arranged)
     detail = _detail(db, scope, node_id, budget)
     if detail is None or not detail.parent_node_id:
         raise TopicNotFound(node_id)
@@ -187,7 +246,7 @@ def find_topic(db: Session, course_id: int | None, node_id: str, budget: int) ->
     return Topic(scope=scope, plan=plan, node_id=node_id, title=detail.title, purpose=detail.purpose or "", depth=detail.depth,
                  section_ids=parent.section_ids, chunk_ids=chunk_ids, chain=parent.chain + [parent.title],
                  objective=parent.objective, prerequisites=parent.prerequisites, next=next_item, version=parent.version,
-                 overlaps=overlaps, new_ideas=new_ideas)
+                 overlaps=overlaps, new_ideas=new_ideas, together=parent.together, together_sources=parent.together_sources)
 
 
 # ------------------------------------------------------------------ evidence
@@ -493,10 +552,14 @@ def _pack(db: Session, topic: Topic, primary: list[Chunk], related: list[tuple[C
     fits = [f"- Study space: {space}",
             f"- Learning objective: {topic.objective}" if topic.objective else "",
             f"- This unit: {' > '.join(topic.chain + [topic.title])}",
+            f"- Studies together: {'; '.join(topic.together)}" if topic.together else "",
             f"- Before this: {topic.prerequisites}" if topic.prerequisites.strip().casefold() not in {"", "none", "none recorded"} else "",
             f"- Comes next: {topic.next['title']}" if topic.next else ""]
     instructions = (f"You are my patient, rigorous study tutor. This session covers one unit of my study plan: {topic.title}."
                     + (f" Its purpose: {topic.purpose}" if topic.purpose else "")
+                    + ((" It combines topics from several of my sources that teach related ideas: teach the combined picture, and point"
+                        " out where the sources agree, differ or add something." if topic.together_sources > 1 else
+                        " It combines related topics: teach them as one connected picture.") if topic.together else "")
                     + "\nUse the source excerpts below as the primary evidence. Explain clearly, define terms, connect ideas, and distinguish what"
                       " the sources say from your own added context. Cite claims with the source labels provided. If the excerpts do not support"
                       " an answer, say what is missing instead of guessing. Some sources give opinions or predictions: present those"
@@ -562,7 +625,9 @@ def prepare_topic(db: Session, ai: AIProvider, course_id: int | None, node_id: s
             parts = parts or plain
             if len(parts) >= 2:
                 if _store_parts(db, topic, parts, groups, budget):
+                    before = done_sessions(db, topic.scope, topic.plan)
                     reopen(db, topic.scope, topic.node_id, budget)  # new material to study: it is no longer done
+                    sync_progress(db, topic.scope, topic.plan, before)  # nor are the topics of a session it belongs to
                 payload = {"reason": f"About {primary_tokens:,} tokens of source material: more than one {size} session holds "
                                      f"({budget_for_sources:,} tokens for sources), so it is divided into {len(parts)} parts.",
                            "source_tokens": primary_tokens, "split_key": key, **_provisional(issues)}
@@ -622,7 +687,8 @@ def _context(profile, overlaps: list[dict], new_ideas: list[str]) -> str:
     what the learner said about themselves. Every passage stays in the unit; the tutor does the merging."""
     block = ""
     if overlaps:
-        lines = [f"- {_one_line(item.get('title'))}" + (f" (from {_one_line(item.get('path'))})" if item.get("path") else "")
+        lines = [f"- {_one_line(item.get('title'))}" + (f" (from {_one_line(item.get('source') or item.get('path'))})"
+                                                          if item.get("source") or item.get("path") else "")
                  + f": {', '.join(_one_line(idea, 80) for idea in item.get('shared') or [])}" for item in overlaps]
         new = ", ".join(_one_line(idea, 80) for idea in new_ideas)
         block = ("## Already met earlier in my plan\nThis unit shares key ideas with earlier units from other sources:\n" + "\n".join(lines)

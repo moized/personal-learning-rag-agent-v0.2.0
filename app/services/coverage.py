@@ -38,7 +38,7 @@ import numpy as np
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import Chunk, Concept, Evidence, Section, StudyPlan, StudyPlanNode
+from ..models import Chunk, Concept, Evidence, Section, Source, StudyPlan, StudyPlanNode
 from .plans import reading_order
 
 SWITCH_COST = 8.0      # in standard deviations of a passage's score: an aside of a few passages does not change the topic
@@ -67,6 +67,10 @@ class Coverage:
     overlaps: dict[str, list[dict]] = field(default_factory=dict)
     # For a topic with overlaps: its key ideas met in no earlier topic, most taught first.
     new_ideas: dict[str, list[str]] = field(default_factory=dict)
+    # Every topic's key ideas, most taught first.
+    ideas: dict[str, list[str]] = field(default_factory=dict)
+    # The names of the sources each topic's sections come from (as the learner named them).
+    sources: dict[str, list[str]] = field(default_factory=dict)
 
 
 def narrowed(overlaps: list[dict], new_ideas: list[str], taught: set[str]) -> tuple[list[dict], list[str]]:
@@ -353,6 +357,9 @@ def plan_coverage(db: Session, plan: StudyPlan | None) -> Coverage:
     names = dict(db.execute(select(Concept.id, Concept.canonical_name)
                             .where(Concept.id.in_({c for ids in ideas_of_chunk.values() for c in ids}))).all())
     paths = {node.node_id: node.title for node in rows if node.node_id == node.path_id}
+    source_names = dict(db.execute(select(Source.id, Source.name).where(Source.id.in_({s.source_id for s in sections.values()}))).all())
+    named = {node.node_id: list(dict.fromkeys(source_names[sections[s].source_id] for s in _section_ids(node)
+                                              if s in sections and sections[s].source_id in source_names)) for node in study}
 
     weight: dict[str, dict[int, int]] = {}   # topic -> key idea -> passages that teach it
     sources: dict[str, set[int]] = {}
@@ -389,7 +396,9 @@ def plan_coverage(db: Session, plan: StudyPlan | None) -> Coverage:
             continue
         found.sort(key=lambda item: (item[0], item[1]))
         overlaps[node.node_id] = [{"id": earlier.node_id, "title": earlier.title, "path": paths.get(earlier.path_id, ""),
-                                   "shared": listed(node.node_id, shared)} for _, _, earlier, shared in found]
+                                   "source": ", ".join(named[earlier.node_id]), "shared": listed(node.node_id, shared)}
+                                  for _, _, earlier, shared in found]
         seen = {c for earlier in study[:index] for c in weight[earlier.node_id]}
         new_ideas[node.node_id] = listed(node.node_id, mine - seen)
-    return _remember(_coverages, key, Coverage(passages=passages, overlaps=overlaps, new_ideas=new_ideas))
+    ideas = {node.node_id: listed(node.node_id, set(weight[node.node_id])) for node in study}
+    return _remember(_coverages, key, Coverage(passages=passages, overlaps=overlaps, new_ideas=new_ideas, ideas=ideas, sources=named))

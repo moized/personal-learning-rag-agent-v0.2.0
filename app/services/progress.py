@@ -137,6 +137,15 @@ def remember_position(db: Session, scope: str, node_id: str, budget: int, title:
     db.flush()
 
 
+def _is_session(db: Session, scope: str, node_id: str) -> bool:
+    """A session of topics the learner's arrangement studies together."""
+    from .arrangement import GROUP_PREFIX, sessions  # it saves progress through this module
+    if not node_id.startswith(GROUP_PREFIX):
+        return False
+    plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope)).scalar_one_or_none()
+    return any(session.id == node_id for session in sessions(db, plan))
+
+
 def current_position(db: Session, scope: str) -> dict | None:
     """The session the learner opened last, while it is still in the plan and not yet studied."""
     row = db.execute(select(StudyPosition).where(StudyPosition.scope_key == scope)).scalar_one_or_none()
@@ -146,7 +155,7 @@ def current_position(db: Session, scope: str) -> dict | None:
         trail = [str(node_id) for node_id in json.loads(row.trail_json or "[]")]
     except (TypeError, ValueError):
         return None
-    if not trail or trail[-1] != row.node_id or not is_plan_topic(db, scope, trail[0]):
+    if not trail or trail[-1] != row.node_id or not (is_plan_topic(db, scope, trail[0]) or _is_session(db, scope, trail[0])):
         return None
     parts = set(trail[1:])
     if parts and parts - set(db.execute(select(TopicDetail.node_id).where(

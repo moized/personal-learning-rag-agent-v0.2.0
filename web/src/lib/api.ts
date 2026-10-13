@@ -14,6 +14,8 @@ export type StudyPackExport={topic:string;study_text:string;sources:{chunk_id:nu
 export type SessionSize="compact"|"standard"|"large"|"xl"
 export type PreparedPart={id:string;title:string;purpose:string;status:"pending"|"unit"|"thin"|"split";estimated_tokens:number}
 export type PreparedTopic={node_id:string;title:string;purpose:string;overlaps?:{id:string;title:string;path:string;shared:string[]}[];new_ideas?:string[];status:"unit"|"thin"|"split";depth:number;budget_tokens:number;trail:string[];next:{id:string;title:string;depth:number}|null;cached:boolean;children:PreparedPart[]|null;study_text?:string;sources?:{chunk_id:number;source:string;title?:string|null;section?:string|null;course?:string|null;is_related:boolean}[];estimated_tokens?:number;source_tokens:number;omitted_passages?:number;related_passages?:number;truncated?:boolean;note?:string|null;reason?:string;warning?:string;provisional?:boolean}
+export type PlanSession={id:string;topics:string[];title:string;why:string;optional:boolean}
+export type Arranged={sessions:number;together:number;optional:number;left_out:string[];ignored:string[]}
 export type StudyPosition={node_id:string;title:string;trail:string[];budget_tokens:number}
 export type Profile={background:string;goal:string;practice:"questions"|"coding"|"both"}
 export type MasterPrompt={text:string;about_me?:boolean;estimated_tokens:number;characters:number;detailed:boolean;topics:number;completed:number;started:boolean;next_topic:{id:string;title:string;partly_done:boolean}|null;done_words:string;paths:{id:string;title:string}[];path_id:string|null}
@@ -83,10 +85,13 @@ export const api={
   if(meta.description)q.set("description",meta.description)
   return req<{source_id:number;job_id:number|null;status:string;deduplicated?:boolean;assignment_conflict?:boolean;course_id?:number|null}>("/sources/youtube?"+q.toString(),{method:"POST"})
  },
- syllabus:(id?:number,regenerate=false)=>req<{syllabus:string;revision:string;source_relationships:{sources:any[];cross_paths:any[];shared_foundations:string[]};nodes:{id:string;parent_id:string|null;path_id:string;type:"outline"|"study";title:string;metadata:Record<string,any>}[];warnings?:string[];status?:PlanStatus;error?:string|null;up_to_date?:boolean;generated_at?:string|null}>("/syllabus"+(id||regenerate?"?"+new URLSearchParams({...(id?{course_id:String(id)}:{}),...(regenerate?{regenerate:"true"}:{})}).toString():"")),
+ syllabus:(id?:number,regenerate=false)=>req<{sessions?:PlanSession[]|null;syllabus:string;revision:string;source_relationships:{sources:any[];cross_paths:any[];shared_foundations:string[]};nodes:{id:string;parent_id:string|null;path_id:string;type:"outline"|"study";title:string;metadata:Record<string,any>}[];warnings?:string[];status?:PlanStatus;error?:string|null;up_to_date?:boolean;generated_at?:string|null}>("/syllabus"+(id||regenerate?"?"+new URLSearchParams({...(id?{course_id:String(id)}:{}),...(regenerate?{regenerate:"true"}:{})}).toString():"")),
  studyPack:(topic:string,id?:number)=>req<any>("/study-pack",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,course_id:id||null,top_k:12})}),
  // retry=false only shows a topic again: a result made while the AI was unavailable is not prepared again.
  prepareTopic:(nodeId:string,courseId:number|undefined,size:SessionSize,tutor:string,retry=true)=>req<PreparedTopic>("/plan/topics/prepare",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({node_id:nodeId,course_id:courseId||null,size,tutor,retry})}),
+ organizeRequest:(courseId:number|undefined)=>req<{text:string;topics:number;code:string}>("/plan/organize-request"+(courseId?"?course_id="+courseId:"")),
+ applyArrangement:(courseId:number|undefined,reply:string)=>req<Arranged>("/plan/arrangement",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({course_id:courseId||null,reply})}),
+ clearArrangement:(courseId:number|undefined)=>req<{deleted:boolean}>("/plan/arrangement"+(courseId?"?course_id="+courseId:""),{method:"DELETE"}),
  profile:()=>req<Profile>("/profile"),
  saveProfile:(data:Profile)=>req<Profile>("/profile",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)}),
  masterPrompt:(courseId:number|undefined,tutor:string,pathId?:string)=>req<MasterPrompt>("/plan/master-prompt?"+new URLSearchParams({...(courseId?{course_id:String(courseId)}:{}),tutor,...(pathId?{path_id:pathId}:{})}).toString()),

@@ -1,6 +1,6 @@
 import {useEffect,useMemo,useRef,useState,type FormEvent,type KeyboardEvent,type ReactNode} from "react"
 import {Brain,Check,ChevronDown,ChevronRight,Copy,Download,FileText,FolderOpen,GraduationCap,Library,LoaderCircle,MessageSquare,Paperclip,Plus,RefreshCw,Send,Sparkles,Trash2,UploadCloud,X} from "lucide-react"
-import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type PasteFormat,type MasterPrompt,type PlanStatus,type PreparedTopic,type Profile,type SessionSize,type Source,type StudyPosition,type StudyPackExport} from "./lib/api"
+import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type PasteFormat,type MasterPrompt,type PlanSession,type PlanStatus,type PreparedTopic,type Profile,type SessionSize,type Source,type StudyPosition,type StudyPackExport} from "./lib/api"
 import LearnView from "./Learn"
 
 type View="chat"|"library"|"plan"|"learn"
@@ -351,6 +351,7 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
   const setSessionSize=(value:SessionSize)=>{setSessionSizeState(value);remember("learnos.session-size",value)}
   const[partlyBudgets,setPartlyBudgets]=useState<Record<string,number>>({})
   const[position,setPosition]=useState<StudyPosition|null>(null)  // the session opened last, kept by the backend
+  const[sessions,setSessions]=useState<PlanSession[]|null>(null)  // how the learner's AI arranged the plan, if it did
   // The open plan topic, then each part opened inside it; the last entry is shown.
   const[unitTrail,setUnitTrail]=useState<PreparedTopic[]>([])
   const[unitBusy,setUnitBusy]=useState(false)
@@ -368,11 +369,12 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
     setSyllabus(plan.syllabus||"");setPlanWarnings(plan.warnings||[]);setRelationshipInfo(normalizePlanRelationships(plan.source_relationships))
     setPlanStatus(plan.status||"ready");setPlanError(plan.error||"");setGeneratedAt(plan.generated_at||null)
     setPlanNodes((plan.nodes||[]).map(node=>({id:node.id,parentId:node.parent_id||"",pathId:node.path_id||"main",kind:node.type,topic:node.title,purpose:node.metadata?.purpose||"",prerequisites:node.metadata?.prerequisites||"",groups:Array.isArray(node.metadata?.source_groups)?node.metadata.source_groups:String(node.metadata?.source_groups||"").split(",").map(s=>s.trim()).filter(Boolean),why:node.metadata?.why_included||"",enables:node.metadata?.enables||"",sourceIds:Array.isArray(node.metadata?.source_ids)?node.metadata.source_ids:[],sourceRoles:Array.isArray(node.metadata?.source_roles)?node.metadata.source_roles:[],confidence:node.metadata?.topic_merge_confidence||0})))
+    setSessions(plan.sessions||null)
     applyProgress(progress)
     setLoadedFor(requested===undefined?"all":String(requested))
   }
   const applyProgress=(progress:Awaited<ReturnType<typeof api.studyProgress>>)=>{setCompletedTopics(new Set((progress.completed_legacy_topics??progress.completed_topics).map(normalizedTopic)));setCompletedIds(new Set(progress.completed_topic_ids||[]));setPartlyIds(new Set(progress.partly_done_topic_ids||[]));setPartlyBudgets(progress.partly_done_budgets||{});setPosition(progress.position||null)}
-  useEffect(()=>{let current=true;const regenerate=regenerateKey!==handledRegenerate.current;handledRegenerate.current=regenerateKey;if(activeCourse.current!==courseId||regenerate){unitRequest.current+=1;setUnitTrail([]);setUnitBusy(false);setUnitError("")}if(activeCourse.current!==courseId){setPlanNodes([]);setPlanStatus("ready");setPlanError("");setGeneratedAt(null);setCompletedIds(new Set());setCompletedTopics(new Set());setPartlyIds(new Set());setPosition(null);setMasterPrompt(null);setLoadedFor(null)}activeCourse.current=courseId;setPack(null);setTopicId(undefined);setTopic("");setPackError("");setBusy(true);setError("");const requested=courseId;Promise.all([api.syllabus(requested,regenerate),api.studyProgress(requested)]).then(([plan,progress])=>{if(current)applyPlan(plan,progress,requested)}).catch(e=>{if(current)setError(e instanceof Error?e.message:"Could not load your study plan")}).finally(()=>{if(current)setBusy(false)});return()=>{current=false}},[courseId,refreshKey,regenerateKey,reloadKey])
+  useEffect(()=>{let current=true;const regenerate=regenerateKey!==handledRegenerate.current;handledRegenerate.current=regenerateKey;if(activeCourse.current!==courseId||regenerate){unitRequest.current+=1;setUnitTrail([]);setUnitBusy(false);setUnitError("")}if(activeCourse.current!==courseId){setPlanNodes([]);setPlanStatus("ready");setPlanError("");setGeneratedAt(null);setCompletedIds(new Set());setCompletedTopics(new Set());setPartlyIds(new Set());setPosition(null);setSessions(null);setMasterPrompt(null);setLoadedFor(null)}activeCourse.current=courseId;setPack(null);setTopicId(undefined);setTopic("");setPackError("");setBusy(true);setError("");const requested=courseId;Promise.all([api.syllabus(requested,regenerate),api.studyProgress(requested)]).then(([plan,progress])=>{if(current)applyPlan(plan,progress,requested)}).catch(e=>{if(current)setError(e instanceof Error?e.message:"Could not load your study plan")}).finally(()=>{if(current)setBusy(false)});return()=>{current=false}},[courseId,refreshKey,regenerateKey,reloadKey])
   const progressKey=[...completedIds].sort().join("|")+"#"+[...completedTopics].sort().join("|")
   useEffect(()=>{if(!planNodes.length){setMasterPrompt(null);return}let current=true;const requested=courseId;api.masterPrompt(requested,tutor).then(result=>{if(current&&activeCourse.current===requested){setMasterPrompt(result);setMasterError("")}}).catch(e=>{if(current)setMasterError(e instanceof Error?e.message:"Could not prepare the master prompt")});return()=>{current=false}},[courseId,tutor,generatedAt,planNodes.length,progressKey,masterTick])
   // While a plan is being built in the background, check again every few seconds; reading never builds.
@@ -428,7 +430,10 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
     if(currentUnit.next)openNext(currentUnit.next)}
   const toggleComplete=(item:OutlineTopic,completed:boolean)=>markDone(item.id,item.topic,completed,setError)
   const unitDone=currentUnit?completedIds.has(currentUnit.node_id)||(currentUnit.depth===0&&completedTopics.has(normalizedTopic(currentUnit.title))):false
-  const selectTopic=(item:OutlineTopic)=>{setTopic(item.topic);setTopicId(item.id);setPack(null);openTopic(item.id);scrollToStudy()}
+  const sessionOf=useMemo(()=>new Map((sessions||[]).flatMap(session=>session.topics.map(topic=>[topic,session] as [string,PlanSession]))),[sessions])
+  const selectTopic=(item:OutlineTopic)=>{const session=sessionOf.get(item.id);setTopic(item.topic);setTopicId(item.id);setPack(null);openTopic(session&&session.topics.length>1?session.id:item.id);scrollToStudy()}
+  // The arrangement changed: the plan, progress and master prompt are read again, and the card shows what is next.
+  const arrangementChanged=()=>{const requested=courseId;unitRequest.current+=1;setUnitTrail([]);setUnitBusy(false);setMasterTick(tick=>tick+1);Promise.all([api.syllabus(requested),api.studyProgress(requested)]).then(([plan,progress])=>{if(activeCourse.current===requested)applyPlan(plan,progress,requested)}).catch(()=>{})}
   const builtAt=generatedAt?new Date(generatedAt.endsWith("Z")||generatedAt.includes("+")?generatedAt:generatedAt+"Z").toLocaleString():""
   const statusLine=planStatus==="updating"?"Updating with your latest material. You can keep studying meanwhile.":planStatus==="failed"?planError:planStatus==="outdated"?"Your material changed; the plan updates by itself shortly.":builtAt?`Up to date · built ${builtAt}`:"Up to date"
   // What the page is about right now.
@@ -449,6 +454,7 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
   // The next topic: from the plan's reading order once known, else the first unstudied topic.
   const nextTopic=masterPrompt?masterPrompt.next_topic:(()=>{const item=studyItems.find(entry=>!isDone(entry));return item?{id:item.id,title:item.topic,partly_done:partlyIds.has(item.id)}:null})()
   const nextNode=nextTopic?outline.find(item=>item.id===nextTopic.id):undefined
+  const nextSession=nextTopic?(sessions||[]).find(session=>session.id===nextTopic.id&&session.topics.length>1):undefined
   const started=Boolean(masterPrompt?.started||studiedCount)
   const resumeAt=position&&nextTopic&&position.trail[0]===nextTopic.id?position:null
   const firstOpenPart=currentUnit?.status==="split"?(currentUnit.children||[]).find(part=>!completedIds.has(part.id)):undefined
@@ -496,7 +502,7 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
           <p className="eyebrow">{resumeAt?"Continue where you left off":started?"Up next":"Start here"}</p>
           <h2 className="study-title">{nextTopic.title}{nextTopic.partly_done&&!resumeAt?<span className="tree-badge partly">Partly done</span>:null}</h2>
           {resumeAt&&resumeAt.node_id!==nextTopic.id&&<p className="plan-help">You were on: <strong>{resumeAt.title}</strong></p>}
-          {nextNode?.purpose&&<p className="plan-help">{nextNode.purpose}</p>}
+          {nextNode?.purpose?<p className="plan-help">{nextNode.purpose}</p>:nextSession?<p className="plan-help">Studies together: {nextSession.topics.map(id=>outline.find(item=>item.id===id)?.topic||id).join(" + ")}.{nextSession.why?` ${nextSession.why}`:""}</p>:null}
           <div className="study-actions"><Button onClick={()=>resumeAt?resume(resumeAt):openNext({id:nextTopic.id,depth:0})}>{started||resumeAt?"Continue studying":"Start studying"}</Button></div>
           <p className="plan-help">LearnOS prepares the study session for you. You copy it into your AI tutor and study.</p>
         </>
@@ -507,11 +513,12 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
         <p className={`plan-status ${planStatus}`} role="status">{planStatus==="updating"&&<LoaderCircle size={13} className="learn-spin"/>}{statusLine}</p>
         {error&&<p className="plan-error" role="alert">{error}</p>}
         {planWarnings.length>0&&<div className="plan-warning" role="status"><strong>Part of this plan is missing.</strong><ul>{planWarnings.map((warning,index)=><li key={index}>{warning}</li>)}</ul><span>This is usually a temporary problem with the AI service. <button className="link-button" onClick={rebuild}>Try again</button></span></div>}
-        <OutlineTree nodes={outline} isDone={isDone} partly={partlyIds} nextId={nextTopic?.id} open={selectTopic} toggle={(item,completed)=>void toggleComplete(item,completed)}/>
+        <OutlineTree nodes={outline} isDone={isDone} partly={partlyIds} nextId={nextTopic?.id} nextTopics={nextSession?.topics} sessionOf={sessionOf} open={selectTopic} toggle={(item,completed)=>void toggleComplete(item,completed)}/>
         {(relationshipInfo.sources.length>0||relationshipInfo.shared_foundations.length>0)&&<details className="outline-markdown"><summary>How LearnOS grouped your sources</summary><div className="plan-help">Source identity is inferred and may be uncertain. Shared topics alone do not establish that sources belong to one course.</div>{relationshipInfo.sources.map((r:any,index:number)=><p key={`${r.source_a_id}-${r.source_b_id}-${index}`}>Source {r.source_a_id} + source {r.source_b_id}: <strong>{String(r.relation_type||"").replaceAll("_"," ")}</strong> ({Math.round(Number(r.confidence||0)*100)}% confidence). {r.rationale}</p>)}{relationshipInfo.shared_foundations.length>0&&<p>Shared foundations: {relationshipInfo.shared_foundations.join(", ")}</p>}</details>}
         <details className="outline-markdown"><summary>The whole plan as text</summary><div className="plan-actions"><CopyAnswer text={syllabus}/></div><div className="plan-syllabus"><MarkdownText text={syllabus}/></div></details>
       </div>
       <details className="plan-section optional-section"><summary><strong>Tell your tutor about you</strong><span>Optional. Your background, goal and how you like to practise are added to every study session you copy, so the tutor pitches it right.</span></summary><AboutYou saved={()=>contextChangedRef.current()}/></details>
+      <details className="plan-section optional-section"><summary><strong>Organize your plan with your AI</strong><span>Optional, and no LearnOS AI calls. Your AI decides which topics to study together, in what order, and what is optional for you.</span></summary><OrganizeWithAI courseId={courseId} planKey={`${generatedAt}|${planNodes.length}|${masterTick}`} arranged={sessions} changed={arrangementChanged}/></details>
       <details className="plan-section optional-section"><summary><strong>Using a ChatGPT or Claude Project, or a Gemini Gem?</strong><span>Optional. Each study session already works on its own; this gives your tutor the whole plan once.</span></summary>
         {masterError&&<p className="plan-error" role="alert">{masterError}</p>}
         {masterPrompt&&<><p className="plan-help">{TUTOR_SETUP[tutor]||TUTOR_SETUP.general} It lists your whole plan and your progress ({masterPrompt.completed} of {plural(masterPrompt.topics,"topic")} studied), so update it now and then.</p>
@@ -527,7 +534,7 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
 
 // The plan's outline as a tree: groups open and close in place, each topic shows whether it is studied or next.
 // Large plans open only the branch with the next topic; a branch never closes by itself once opened.
-function OutlineTree({nodes,isDone,partly,nextId,open,toggle}:{nodes:OutlineTopic[];isDone:(item:OutlineTopic)=>boolean;partly:Set<string>;nextId?:string;open:(item:OutlineTopic)=>void;toggle:(item:OutlineTopic,completed:boolean)=>void}){
+function OutlineTree({nodes,isDone,partly,nextId,nextTopics,sessionOf,open,toggle}:{nodes:OutlineTopic[];isDone:(item:OutlineTopic)=>boolean;partly:Set<string>;nextId?:string;nextTopics?:string[];sessionOf?:Map<string,PlanSession>;open:(item:OutlineTopic)=>void;toggle:(item:OutlineTopic,completed:boolean)=>void}){
   const ids=new Set(nodes.map(node=>node.id))
   const children=new Map<string,OutlineTopic[]>()
   const roots:OutlineTopic[]=[]
@@ -539,7 +546,7 @@ function OutlineTree({nodes,isDone,partly,nextId,open,toggle}:{nodes:OutlineTopi
   const count=(id:string,seen:Set<string>):{done:number;total:number}=>{const cached=below.get(id);if(cached)return cached;if(seen.has(id))return {done:0,total:0};seen.add(id);let done=0,total=0;for(const child of children.get(id)||[]){if(child.kind==="study"){total++;if(isDone(child))done++}const inner=count(child.id,seen);done+=inner.done;total+=inner.total}const result={done,total};below.set(id,result);return result}
   const parentOf=new Map(nodes.map(node=>[node.id,node.parentId]))
   const everOnPath=useRef(new Set<string>())  // branches opened for "Up next" stay open when it moves on
-  let cursor=nextId?parentOf.get(nextId):undefined;for(let guard=0;cursor&&guard<20;guard++){everOnPath.current.add(cursor);cursor=parentOf.get(cursor)}
+  for(const id of [nextId,...(nextTopics||[])]){let cursor=id?parentOf.get(id):undefined;for(let guard=0;cursor&&guard<20;guard++){everOnPath.current.add(cursor);cursor=parentOf.get(cursor)}}
   const small=nodes.filter(node=>node.kind==="study").length<=40
   const[expanded,setExpanded]=useState<Record<string,boolean>>({})
   const isOpen=(id:string)=>expanded[id]??(small||everOnPath.current.has(id))
@@ -548,11 +555,11 @@ function OutlineTree({nodes,isDone,partly,nextId,open,toggle}:{nodes:OutlineTopi
     if(seen.has(item.id)||depth>12)return null
     const inner=new Set(seen).add(item.id)
     const kids=children.get(item.id)||[]
-    if(item.kind==="study"){const done=isDone(item);const next=item.id===nextId
+    if(item.kind==="study"){const done=isDone(item);const next=item.id===nextId||Boolean(nextTopics?.includes(item.id));const session=sessionOf?.get(item.id)
       return <div key={item.id}><div className={`tree-row${done?" completed":""}${next?" next":""}`}>
         <label className="outline-check"><input type="checkbox" checked={done} onChange={event=>toggle(item,event.target.checked)} aria-label={`Mark ${item.topic} ${done?"not studied":"studied"}`}/><span>{done?<Check size={13}/>:null}</span></label>
         <button className="outline-topic-button" onClick={()=>open(item)}><strong>{item.topic}</strong>{item.purpose&&<small>{item.purpose}</small>}{item.prerequisites&&item.prerequisites!=="None recorded"&&item.prerequisites.toLowerCase()!=="none"&&<em>Before this: {item.prerequisites}</em>}</button>
-        <span className="tree-badges">{next&&<span className="tree-badge next">Up next</span>}{!done&&partly.has(item.id)&&<span className="tree-badge partly">Partly done</span>}</span>
+        <span className="tree-badges">{next&&<span className="tree-badge next">Up next</span>}{!done&&partly.has(item.id)&&<span className="tree-badge partly">Partly done</span>}{session&&session.topics.length>1&&<span className="tree-badge together" title={session.title}>Studied together</span>}{session?.optional&&<span className="tree-badge optional">Optional</span>}</span>
       </div>{kids.length>0&&<div className="tree-children">{kids.map(child=>row(child,depth+1,inner))}</div>}</div>}
     const isExpanded=isOpen(item.id);const {done,total}=count(item.id,new Set())
     return <div key={item.id} className="tree-group">
@@ -725,6 +732,30 @@ function PasteTextForm({label,onSave,onCancel}:{label:string;onSave:(text:string
     <div className="paste-form-actions"><select className="text-input" aria-label="Text format" value={format} onChange={event=>setFormat(event.target.value as PasteFormat)}><option value="plain">Plain text</option><option value="srt">SRT subtitles</option><option value="vtt">VTT subtitles</option></select><Button type="submit" disabled={busy||!text.trim()}>{busy?<><LoaderCircle size={14}/>Saving…</>:"Save and index"}</Button><Button variant="ghost" onClick={onCancel}>Cancel</Button></div>
     {error&&<p className="dialog-error" role="alert">{error}</p>}
   </form>
+}
+
+function OrganizeWithAI({courseId,planKey,arranged,changed}:{courseId?:number;planKey:string;arranged:PlanSession[]|null;changed:()=>void}){
+  const[request,setRequest]=useState("")
+  const[reply,setReply]=useState("")
+  const[busy,setBusy]=useState(false)
+  const[error,setError]=useState("")
+  const[result,setResult]=useState("")
+  useEffect(()=>{let current=true;setRequest("");setResult("");setError("");api.organizeRequest(courseId).then(found=>{if(current)setRequest(found.text)}).catch(e=>{if(current)setError(e instanceof Error?e.message:"Could not prepare the request")});return()=>{current=false}},[courseId,planKey])
+  const apply=async(event:FormEvent)=>{event.preventDefault();if(!reply.trim())return;setBusy(true);setError("");setResult("")
+    try{const done=await api.applyArrangement(courseId,reply);setReply("")
+      setResult(`Your plan is now ${plural(done.sessions,"study session")}${done.together?`; ${done.together} of them combine topics`:""}${done.optional?`; ${done.optional} optional, at the end`:""}.${done.left_out.length?` ${plural(done.left_out.length,"topic")} your AI left out keep a session of their own.`:""}`)
+      changed()}catch(e){setError(e instanceof Error?e.message:"Could not apply that answer")}finally{setBusy(false)}}
+  const reset=async()=>{setBusy(true);setError("");setResult("");try{await api.clearArrangement(courseId);setResult("Back to LearnOS's order: every topic is a session of its own.");changed()}catch(e){setError(e instanceof Error?e.message:"Could not undo the arrangement")}finally{setBusy(false)}}
+  return <div className="organize">
+    <ol className="organize-steps">
+      <li><strong>Copy this request</strong> and paste it into ChatGPT, Claude or Gemini.<div className="plan-actions">{request?<CopyAnswer text={request} label="Copy the request"/>:!error&&<span className="plan-help">Preparing…</span>}</div></li>
+      <li><strong>Paste its whole answer here</strong> and apply it. Every passage stays in your plan; only the grouping and order change.
+        <form onSubmit={event=>void apply(event)}><textarea className="text-input" rows={4} value={reply} placeholder="Paste your AI's answer" aria-label="Your AI's answer" onChange={event=>setReply(event.target.value)}/><div className="plan-actions"><Button type="submit" disabled={busy||!reply.trim()}>{busy?"Applying…":"Apply"}</Button></div></form></li>
+    </ol>
+    {arranged&&<p className="plan-help">Your plan follows your AI's arrangement ({plural(arranged.length,"session")}). <button className="link-button" disabled={busy} onClick={()=>void reset()}>Go back to LearnOS's order</button></p>}
+    {result&&<p className="plan-help" role="status">{result}</p>}
+    {error&&<p className="plan-error" role="alert">{error}</p>}
+  </div>
 }
 
 function AboutYou({saved}:{saved:()=>void}){
