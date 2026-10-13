@@ -1,6 +1,6 @@
 import {useEffect,useMemo,useRef,useState,type FormEvent,type KeyboardEvent,type ReactNode} from "react"
 import {Brain,Check,ChevronDown,ChevronRight,Copy,Download,FileText,FolderOpen,GraduationCap,Library,LoaderCircle,MessageSquare,Paperclip,Plus,RefreshCw,Send,Sparkles,Trash2,UploadCloud,X} from "lucide-react"
-import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type PasteFormat,type MasterPrompt,type PlanStatus,type PreparedTopic,type Profile,type SessionSize,type Source,type StudyPackExport} from "./lib/api"
+import {api,type ChatTurn,type ConversationSummary,type Course,type Job,type MaintenanceJob,type PasteFormat,type MasterPrompt,type PlanStatus,type PreparedTopic,type Profile,type SessionSize,type Source,type StudyPosition,type StudyPackExport} from "./lib/api"
 import LearnView from "./Learn"
 
 type View="chat"|"library"|"plan"|"learn"
@@ -350,6 +350,7 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
   const[sessionSize,setSessionSizeState]=useState<SessionSize>(()=>remembered("learnos.session-size",["compact","standard","large","xl"],"standard") as SessionSize)
   const setSessionSize=(value:SessionSize)=>{setSessionSizeState(value);remember("learnos.session-size",value)}
   const[partlyBudgets,setPartlyBudgets]=useState<Record<string,number>>({})
+  const[position,setPosition]=useState<StudyPosition|null>(null)  // the session opened last, kept by the backend
   // The open plan topic, then each part opened inside it; the last entry is shown.
   const[unitTrail,setUnitTrail]=useState<PreparedTopic[]>([])
   const[unitBusy,setUnitBusy]=useState(false)
@@ -370,8 +371,8 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
     applyProgress(progress)
     setLoadedFor(requested===undefined?"all":String(requested))
   }
-  const applyProgress=(progress:Awaited<ReturnType<typeof api.studyProgress>>)=>{setCompletedTopics(new Set((progress.completed_legacy_topics??progress.completed_topics).map(normalizedTopic)));setCompletedIds(new Set(progress.completed_topic_ids||[]));setPartlyIds(new Set(progress.partly_done_topic_ids||[]));setPartlyBudgets(progress.partly_done_budgets||{})}
-  useEffect(()=>{let current=true;const regenerate=regenerateKey!==handledRegenerate.current;handledRegenerate.current=regenerateKey;if(activeCourse.current!==courseId||regenerate){unitRequest.current+=1;setUnitTrail([]);setUnitBusy(false);setUnitError("")}if(activeCourse.current!==courseId){setPlanNodes([]);setPlanStatus("ready");setPlanError("");setGeneratedAt(null);setCompletedIds(new Set());setCompletedTopics(new Set());setPartlyIds(new Set());setMasterPrompt(null);setLoadedFor(null)}activeCourse.current=courseId;setPack(null);setTopicId(undefined);setTopic("");setPackError("");setBusy(true);setError("");const requested=courseId;Promise.all([api.syllabus(requested,regenerate),api.studyProgress(requested)]).then(([plan,progress])=>{if(current)applyPlan(plan,progress,requested)}).catch(e=>{if(current)setError(e instanceof Error?e.message:"Could not load your study plan")}).finally(()=>{if(current)setBusy(false)});return()=>{current=false}},[courseId,refreshKey,regenerateKey,reloadKey])
+  const applyProgress=(progress:Awaited<ReturnType<typeof api.studyProgress>>)=>{setCompletedTopics(new Set((progress.completed_legacy_topics??progress.completed_topics).map(normalizedTopic)));setCompletedIds(new Set(progress.completed_topic_ids||[]));setPartlyIds(new Set(progress.partly_done_topic_ids||[]));setPartlyBudgets(progress.partly_done_budgets||{});setPosition(progress.position||null)}
+  useEffect(()=>{let current=true;const regenerate=regenerateKey!==handledRegenerate.current;handledRegenerate.current=regenerateKey;if(activeCourse.current!==courseId||regenerate){unitRequest.current+=1;setUnitTrail([]);setUnitBusy(false);setUnitError("")}if(activeCourse.current!==courseId){setPlanNodes([]);setPlanStatus("ready");setPlanError("");setGeneratedAt(null);setCompletedIds(new Set());setCompletedTopics(new Set());setPartlyIds(new Set());setPosition(null);setMasterPrompt(null);setLoadedFor(null)}activeCourse.current=courseId;setPack(null);setTopicId(undefined);setTopic("");setPackError("");setBusy(true);setError("");const requested=courseId;Promise.all([api.syllabus(requested,regenerate),api.studyProgress(requested)]).then(([plan,progress])=>{if(current)applyPlan(plan,progress,requested)}).catch(e=>{if(current)setError(e instanceof Error?e.message:"Could not load your study plan")}).finally(()=>{if(current)setBusy(false)});return()=>{current=false}},[courseId,refreshKey,regenerateKey,reloadKey])
   const progressKey=[...completedIds].sort().join("|")+"#"+[...completedTopics].sort().join("|")
   useEffect(()=>{if(!planNodes.length){setMasterPrompt(null);return}let current=true;const requested=courseId;api.masterPrompt(requested,tutor).then(result=>{if(current&&activeCourse.current===requested){setMasterPrompt(result);setMasterError("")}}).catch(e=>{if(current)setMasterError(e instanceof Error?e.message:"Could not prepare the master prompt")});return()=>{current=false}},[courseId,tutor,generatedAt,planNodes.length,progressKey,masterTick])
   // While a plan is being built in the background, check again every few seconds; reading never builds.
@@ -379,7 +380,8 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
   const makePack=async(event:FormEvent)=>{event.preventDefault();if(!topic.trim())return;setBusy(true);setPackError("");try{const result=await api.exportStudyPack(topic.trim(),courseId,tutor,maxInputTokens,topicId);setPack(result)}catch(e){setPackError(e instanceof Error?e.message:"Could not prepare study pack")}finally{setBusy(false)}}
   // Opens a plan topic (trail empty) or a part of the last topic in `trail`. retry=false only shows it again.
   // A topic too large for one session opens at its first unfinished part, unless its list of parts was asked for.
-  const openUnit=async(nodeId:string,trail:PreparedTopic[],options:{size?:SessionSize;tutor?:string;retry?:boolean;showParts?:boolean}={})=>{
+  // `path` leads to a part further down (the ids below this topic), as when continuing where the learner left off.
+  const openUnit=async(nodeId:string,trail:PreparedTopic[],options:{size?:SessionSize;tutor?:string;retry?:boolean;showParts?:boolean;path?:string[]}={})=>{
     const size=options.size??sessionSize,tutorName=options.tutor??tutor
     if(unitBusy&&unitTarget.current?.nodeId===nodeId&&!options.size&&!options.tutor)return  // a second click on what is loading
     const request=++unitRequest.current;const requested=courseId;unitTarget.current={nodeId,trail};setUnitBusy(true);setUnitError("")
@@ -387,8 +389,9 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
       const result=await api.prepareTopic(nodeId,requested,size,tutorName,options.retry??true)
       if(request!==unitRequest.current||activeCourse.current!==requested)return
       const nextTrail=[...trail,result];setUnitTrail(nextTrail)
-      const firstOpen=result.status==="split"&&!options.showParts?(result.children||[]).find(part=>!doneIds.current.has(part.id)):undefined
-      if(firstOpen)void openUnit(firstOpen.id,nextTrail,{size,tutor:tutorName,retry:options.retry})
+      const wanted=result.status==="split"&&options.path?.length?(result.children||[]).find(part=>part.id===options.path![0]):undefined
+      const firstOpen=wanted||(result.status==="split"&&!options.showParts?(result.children||[]).find(part=>!doneIds.current.has(part.id)):undefined)
+      if(firstOpen)void openUnit(firstOpen.id,nextTrail,{size,tutor:tutorName,retry:options.retry,path:wanted?options.path!.slice(1):undefined})
     }catch(e){
       if(request!==unitRequest.current)return
       const status=(e as {status?:number}).status
@@ -416,6 +419,8 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
   // The next unit shares the open trail down to its own depth: a sibling part keeps the parent, the next topic starts fresh.
   const sizeFor=(id:string):SessionSize|undefined=>{const name=Object.entries(SIZE_TOKENS).find(([,tokens])=>tokens===partlyBudgets[id])?.[0] as SessionSize|undefined;return name&&name!==sessionSize?name:undefined}
   const openTopic=(id:string)=>{const size=sizeFor(id);if(size)setSessionSize(size);void openUnit(id,[],size?{size}:{})}
+  // Back to the session opened last, at the size it was made for.
+  const resume=(at:StudyPosition)=>{const size=(Object.entries(SIZE_TOKENS).find(([,tokens])=>tokens===at.budget_tokens)?.[0] as SessionSize|undefined);const other=size&&size!==sessionSize?size:undefined;if(other)setSessionSize(other);void openUnit(at.trail[0],[],{...(other?{size:other}:{}),path:at.trail.slice(1)});scrollToStudy()}
   const openNext=(next:{id:string;depth:number})=>{if(next.depth===0)openTopic(next.id);else void openUnit(next.id,unitTrail.slice(0,next.depth));scrollToStudy()}
   const doneAndNext=async()=>{if(!currentUnit)return;const course=courseId,request=unitRequest.current
     if(!unitDone&&!(await markDone(currentUnit.node_id,currentUnit.title,true)))return
@@ -445,6 +450,7 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
   const nextTopic=masterPrompt?masterPrompt.next_topic:(()=>{const item=studyItems.find(entry=>!isDone(entry));return item?{id:item.id,title:item.topic,partly_done:partlyIds.has(item.id)}:null})()
   const nextNode=nextTopic?outline.find(item=>item.id===nextTopic.id):undefined
   const started=Boolean(masterPrompt?.started||studiedCount)
+  const resumeAt=position&&nextTopic&&position.trail[0]===nextTopic.id?position:null
   const firstOpenPart=currentUnit?.status==="split"?(currentUnit.children||[]).find(part=>!completedIds.has(part.id)):undefined
   const nextLabel=currentUnit?.next?(currentUnit.next.depth>0?"Done · next part":"Done · next topic"):""
   // At the end of a learning path the plan may still have topics elsewhere (another path, or one skipped).
@@ -487,10 +493,11 @@ function StudyPlanView({courseId,courseName,sources,sourcesLoaded,aiReady,refres
           <div className="study-actions">{firstOpenPart?<Button onClick={()=>void openUnit(firstOpenPart.id,unitTrail)}>Continue with: {firstOpenPart.title}</Button>:currentUnit.next?<Button onClick={()=>openNext(currentUnit.next!)}>Next: {currentUnit.next.title}</Button>:planNext?<Button onClick={()=>openNext({id:planNext.id,depth:0})}>Next: {planNext.title}</Button>:<span className="plan-help">All parts studied. You have studied every topic in this plan.</span>}</div>
         </>
         :nextTopic?<>
-          <p className="eyebrow">{started?"Up next":"Start here"}</p>
-          <h2 className="study-title">{nextTopic.title}{nextTopic.partly_done?<span className="tree-badge partly">Partly done</span>:null}</h2>
+          <p className="eyebrow">{resumeAt?"Continue where you left off":started?"Up next":"Start here"}</p>
+          <h2 className="study-title">{nextTopic.title}{nextTopic.partly_done&&!resumeAt?<span className="tree-badge partly">Partly done</span>:null}</h2>
+          {resumeAt&&resumeAt.node_id!==nextTopic.id&&<p className="plan-help">You were on: <strong>{resumeAt.title}</strong></p>}
           {nextNode?.purpose&&<p className="plan-help">{nextNode.purpose}</p>}
-          <div className="study-actions"><Button onClick={()=>openNext({id:nextTopic.id,depth:0})}>{started?"Continue studying":"Start studying"}</Button></div>
+          <div className="study-actions"><Button onClick={()=>resumeAt?resume(resumeAt):openNext({id:nextTopic.id,depth:0})}>{started||resumeAt?"Continue studying":"Start studying"}</Button></div>
           <p className="plan-help">LearnOS prepares the study session for you. You copy it into your AI tutor and study.</p>
         </>
         :<><p className="eyebrow">All done</p><h2 className="study-title">You have studied every topic</h2><p className="plan-help">Choose any topic below to review it, or add more material.</p></>}

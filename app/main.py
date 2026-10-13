@@ -18,11 +18,11 @@ from .providers.factory import provider
 from .routers.learner import router as learner_router
 from .services.study import answer
 from .services.curriculum import build_study_pack_prompt, build_external_study_pack
-from .services.plans import read_plan, request_updates_after_change
-from .services.units import OutlineTopic, StaleTopic, TopicNotFound, prepare_topic, topic_lock
+from .services.plans import read_plan, request_updates_after_change, scope_key
+from .services.units import SESSION_SIZES, OutlineTopic, StaleTopic, TopicNotFound, prepare_topic, topic_lock
 from .services.handoff import NoPlan, master_prompt
 from .services.profile import get_profile, profile_json, save_profile
-from .services.progress import plan_topic_of, roll_up, save_progress
+from .services.progress import current_position, plan_topic_of, remember_position, roll_up, save_progress
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
 from .services.spaces import also_in, in_space, spaces_of
 from .services.organize import index_pending, queue_organization
@@ -1065,7 +1065,10 @@ def prepare_plan_topic(req: PrepareTopicRequest):
     for attempt in range(2):
         try:
             with topic_lock(req.course_id, req.node_id, req.size), session_scope() as db:
-                return prepare_topic(db, ai, req.course_id, req.node_id, req.size, req.tutor, retry_provisional=req.retry)
+                result = prepare_topic(db, ai, req.course_id, req.node_id, req.size, req.tutor, retry_provisional=req.retry)
+                if result["status"] in {"unit", "thin"}:  # a study session was opened: the learner continues here next time
+                    remember_position(db, scope_key(req.course_id), req.node_id, SESSION_SIZES[req.size], result["title"])
+                return result
         except IntegrityError:  # another process prepared the same topic at the same moment
             if attempt:
                 raise HTTPException(409, "This topic is being prepared; try again in a moment.")
@@ -1134,7 +1137,9 @@ def study_progress(course_id: int | None = None):
                 # Plan topics with some of their parts studied, but not all.
                 "partly_done_topic_ids": partly,
                 # The session size most of its studied parts were made for: reopening it there continues it.
-                "partly_done_budgets": {topic: max(sizes[topic], key=lambda budget: sizes[topic][budget]) for topic in partly if topic in sizes}}
+                "partly_done_budgets": {topic: max(sizes[topic], key=lambda budget: sizes[topic][budget]) for topic in partly if topic in sizes},
+                # The session opened last and not yet studied: {node_id, title, trail, budget_tokens}, or None.
+                "position": current_position(db, scope)}
 
 
 @app.post("/study-progress")

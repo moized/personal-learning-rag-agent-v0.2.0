@@ -16,7 +16,7 @@ from ..models import Course, StudyPlan, StudyPlanNode, StudyProgress
 from .coverage import plan_coverage, shown
 from .plans import reading_order, scope_key
 from .profile import about_me_lines, get_profile, missing, practice_instruction
-from .progress import plan_topic_of, topic_key
+from .progress import current_position, plan_topic_of, topic_key
 from .units import DONE_WORDS, TUTOR_NAMES, estimate_tokens
 
 # Above this the outline lists titles only, so the prompt stays a practical size to paste.
@@ -83,6 +83,12 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
         after = same_path[same_path.index(recent):]
         upcoming = next((node for node in after if not done(node)), None) or next((node for node in same_path if not done(node)), None)
     upcoming = upcoming or next((node for node in study if not done(node)), None)
+    # A session opened and not finished is where the learner is, even with nothing ticked yet.
+    position = current_position(db, scope)
+    resume = by_id.get(position["trail"][0]) if position else None
+    if resume is not None and not done(resume):
+        upcoming = resume
+        started.add(resume.node_id)
 
     course = db.get(Course, course_id) if course_id is not None else None
     space = _flat(course.name) if course else "All my sources"

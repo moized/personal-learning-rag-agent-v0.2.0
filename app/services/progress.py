@@ -6,10 +6,12 @@ size are; un-ticking a part re-opens the topics above it unless they are still c
 """
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import StudyPlan, StudyPlanNode, StudyProgress, TopicDetail
+from ..models import StudyPlan, StudyPlanNode, StudyPosition, StudyProgress, TopicDetail
 
 
 def topic_key(title: str) -> str:
@@ -118,3 +120,40 @@ def plan_topic_of(db: Session, scope: str) -> dict[str, str]:
             current = parents[current]
         roots[node_id] = current
     return roots
+
+
+def remember_position(db: Session, scope: str, node_id: str, budget: int, title: str) -> None:
+    """The learner opened this study session: it is where they continue next time, even unfinished."""
+    parents = dict(db.execute(select(TopicDetail.node_id, TopicDetail.parent_node_id).where(
+        TopicDetail.scope_key == scope, TopicDetail.budget_tokens == budget)).all())
+    trail = [node_id]
+    while parents.get(trail[0]) and len(trail) < 10:
+        trail.insert(0, parents[trail[0]])
+    row = db.execute(select(StudyPosition).where(StudyPosition.scope_key == scope)).scalar_one_or_none()
+    if row is None:
+        row = StudyPosition(scope_key=scope)
+        db.add(row)
+    row.node_id, row.trail_json, row.budget_tokens, row.title = node_id, json.dumps(trail), budget, title[:500]
+    db.flush()
+
+
+def current_position(db: Session, scope: str) -> dict | None:
+    """The session the learner opened last, while it is still in the plan and not yet studied."""
+    row = db.execute(select(StudyPosition).where(StudyPosition.scope_key == scope)).scalar_one_or_none()
+    if row is None:
+        return None
+    try:
+        trail = [str(node_id) for node_id in json.loads(row.trail_json or "[]")]
+    except (TypeError, ValueError):
+        return None
+    if not trail or trail[-1] != row.node_id or not is_plan_topic(db, scope, trail[0]):
+        return None
+    parts = set(trail[1:])
+    if parts and parts - set(db.execute(select(TopicDetail.node_id).where(
+            TopicDetail.scope_key == scope, TopicDetail.budget_tokens == row.budget_tokens,
+            TopicDetail.node_id.in_(parts))).scalars().all()):
+        return None  # its parts were made again differently
+    if db.execute(select(StudyProgress.id).where(StudyProgress.scope_key == scope, StudyProgress.completed.is_(True),
+                                                 StudyProgress.node_id == row.node_id)).first():
+        return None  # studied: what comes next follows from progress
+    return {"node_id": row.node_id, "title": row.title, "trail": trail, "budget_tokens": row.budget_tokens}

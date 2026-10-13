@@ -14,6 +14,7 @@ export type StudyPackExport={topic:string;study_text:string;sources:{chunk_id:nu
 export type SessionSize="compact"|"standard"|"large"|"xl"
 export type PreparedPart={id:string;title:string;purpose:string;status:"pending"|"unit"|"thin"|"split";estimated_tokens:number}
 export type PreparedTopic={node_id:string;title:string;purpose:string;overlaps?:{id:string;title:string;path:string;shared:string[]}[];new_ideas?:string[];status:"unit"|"thin"|"split";depth:number;budget_tokens:number;trail:string[];next:{id:string;title:string;depth:number}|null;cached:boolean;children:PreparedPart[]|null;study_text?:string;sources?:{chunk_id:number;source:string;title?:string|null;section?:string|null;course?:string|null;is_related:boolean}[];estimated_tokens?:number;source_tokens:number;omitted_passages?:number;related_passages?:number;truncated?:boolean;note?:string|null;reason?:string;warning?:string;provisional?:boolean}
+export type StudyPosition={node_id:string;title:string;trail:string[];budget_tokens:number}
 export type Profile={background:string;goal:string;practice:"questions"|"coding"|"both"}
 export type MasterPrompt={text:string;about_me?:boolean;estimated_tokens:number;characters:number;detailed:boolean;topics:number;completed:number;started:boolean;next_topic:{id:string;title:string;partly_done:boolean}|null;done_words:string;paths:{id:string;title:string}[];path_id:string|null}
 export type MasteryStatus="unseen"|"learning"|"due"|"mastered"
@@ -48,7 +49,7 @@ export const api={
  pasteSourceText:(sourceId:number,text:string,format:PasteFormat)=>req<{source_id:number;job_id:number}>(`/sources/${sourceId}/text`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,input_format:format})}),
  reprocessSource:(sourceId:number)=>req<{source_id:number;job_id:number;documents_retried:number}>(`/sources/${sourceId}/reprocess`,{method:"POST"}),
  removeSource:(sourceId:number,failedAttemptsOnly=false)=>req<{removed:boolean;source_id:number;removed_count:number}>(`/sources/${sourceId}${failedAttemptsOnly?"?failed_attempts_only=true":""}`,{method:"DELETE"}),
- studyProgress:(courseId?:number)=>req<{completed_topics:string[];completed_topic_ids?:string[];completed_legacy_topics?:string[];partly_done_topic_ids?:string[];partly_done_budgets?:Record<string,number>}>("/study-progress"+(courseId?"?course_id="+courseId:"")),
+ studyProgress:(courseId?:number)=>req<{completed_topics:string[];completed_topic_ids?:string[];completed_legacy_topics?:string[];partly_done_topic_ids?:string[];partly_done_budgets?:Record<string,number>;position?:StudyPosition|null}>("/study-progress"+(courseId?"?course_id="+courseId:"")),
  updateStudyProgress:(topic:string,courseId:number|undefined,completed:boolean,topicId?:string)=>req<any>("/study-progress",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,topic_id:topicId||null,course_id:courseId||null,completed})}),
  jobs:()=>req<Job[]>("/jobs"),
  organizeExisting:(includeUnassigned=true)=>req<Pick<MaintenanceJob,"id"|"status"|"progress_current"|"progress_total"|"checkpoint">&{deduplicated:boolean}>("/maintenance/organize-existing?include_unassigned="+includeUnassigned,{method:"POST"}),
