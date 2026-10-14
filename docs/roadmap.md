@@ -10,7 +10,10 @@
 - structure-aware chunks
 - batched embeddings
 - semantic groups
-- group-level concept extraction
+- batched organize decisions with per-excerpt concepts
+- manual paste-back decisions
+- near-duplicate merging
+- saved syllabus with one-topic-at-a-time tutor flow
 - hybrid dense + BM25 retrieval
 - RRF
 - optional LLM reranking

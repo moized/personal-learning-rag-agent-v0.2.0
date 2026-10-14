@@ -9,12 +9,14 @@ A self-organizing RAG + curriculum system for studying from lectures, transcript
 - Optional source metadata: domain, topic, description and arbitrary JSON/Python-dict metadata.
 - Structure-aware chunking and context-enriched indexing.
 - Batched embeddings with `gemini-embedding-2`.
-- Semantic groups with centroid routing and LLM validation only when ambiguous.
-- Group-level concept extraction instead of one LLM call per chunk.
+- Semantic groups organized by one decision per ~40 excerpts: groups are named from the content, concepts are tagged per excerpt reusing existing names and aliases, and centroids are the fallback.
 - Hybrid retrieval: dense + BM25 + RRF + Gemini 3.5 Flash-Lite reranking.
 - Context-window expansion for lecture/transcript continuity.
 - Persistent jobs, checkpoints, retries and crash-safe resume.
 - Course syllabus generation and copy-paste-ready study packs.
+- Manual (paste-back) mode: without an API key, every model decision becomes a prompt you answer with any external AI; the paused job then finishes on its own.
+- Near-duplicate merging: text repeated across sources in a course is stored once.
+- Saved study outline with numbered topics and per-topic status, plus a guided session that feeds an external AI tutor one topic at a time.
 
 ## Run
 
@@ -32,6 +34,27 @@ In a second shell:
 ```bash
 streamlit run frontend/app.py
 ```
+
+## AI modes
+
+`AI_MODE` in `.env` picks who makes the model decisions:
+
+| Mode | Decisions (organizing, outline) | Embeddings |
+|---|---|---|
+| `auto` (default) | Gemini when `GEMINI_API_KEY` is set, otherwise `manual` | as in the chosen mode |
+| `gemini` | Gemini API | Gemini |
+| `manual` | You, by pasting prompts into ChatGPT / Gemini / Claude | Gemini if a key is set, else local hashing |
+| `local` | Offline fallbacks only (groups named after the source) | local hashing |
+
+In manual mode a job that needs a decision shows status `waiting`. Open **Decisions waiting for your external AI** in the UI (or `GET /decisions`), copy the prompt into your AI, paste its full reply back, and the job resumes from where it stopped. Replies wrapped in prose or code fences are accepted; a reply that is not valid JSON is rejected so you can paste it again.
+
+## Studying with an external AI
+
+1. **Add material.** Each source is split into pieces, repeated text is merged into the earlier copy, and the remaining pieces are organized into groups and concepts.
+2. **Generate the study outline** (`POST /syllabus`). It is saved with numbered topics; every piece of the course belongs to exactly one topic. Regenerating keeps the status of topics whose title did not change.
+3. **Kickoff** (`GET /tutor/kickoff`). Paste this into a new chat. It gives the AI the outline and tells it to ask you where to start and what to skip, and to answer with a line like `START: 3; SKIP: 5, 7`.
+4. **Start** (`POST /tutor/start`). Paste that line back (or pick the start topic and skips yourself). Earlier and skipped topics are marked `skipped`, and you get the first message to paste.
+5. **Next** (`POST /tutor/next`). Each call returns the next topic, or the next part of a long topic, as verbatim excerpts in reading order, and records it as sent. Topics move through `pending → in_progress → done`; you can set any topic back to `pending` or `skipped` (`POST /syllabus/topics/{id}/status`), and `GET /tutor/topics/{id}/parts/{n}` re-sends a part without changing progress.
 
 ## Model configuration
 

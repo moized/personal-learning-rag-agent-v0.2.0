@@ -3,13 +3,16 @@ import re
 import threading
 import time
 from pathlib import Path
-from sqlalchemy import select
+from sqlalchemy import select, func
 from ..config import settings
 from ..db import session_scope
-from ..models import Source, Document, Chunk, Job, Group
+from ..models import Source, Document, Chunk, Job
+from ..providers.base import DecisionPending, is_automatic
 from ..providers.factory import provider
 from .ingestion import parse_file, chunk_text, list_youtube_videos, fetch_youtube_transcript
-from .grouping import choose_group, extract_group_concepts, merge_centroid
+from .grouping import organize_batch
+from .dedupe import mark_duplicates
+from .decisions import pause_job, requeue_waiting_jobs
 from .agent import set_plan
 
 
@@ -27,6 +30,8 @@ class Worker(threading.Thread):
         with session_scope() as db:
             for job in db.execute(select(Job).where(Job.status == "running")).scalars().all():
                 job.status = "queued"
+            # Answers pasted while the worker was down still resume their jobs.
+            requeue_waiting_jobs(db)
         while not self.stop_event.is_set():
             with session_scope() as db:
                 from .queue import claim_next
@@ -36,6 +41,10 @@ class Worker(threading.Thread):
                 continue
             try:
                 self.process_job(job.id)
+            except DecisionPending as pending:
+                # Not a failure: the job sleeps until the user pastes the external AI's answer.
+                with session_scope() as db:
+                    pause_job(db, job.id, pending)
             except Exception as exc:
                 with session_scope() as db:
                     job = db.get(Job, job.id)
@@ -97,7 +106,7 @@ class Worker(threading.Thread):
         return len(videos)
 
     def _ensure_source_profile(self, db, src: Source, ai):
-        if src.profile_json:
+        if src.profile_json or not is_automatic(ai):
             return
         chunks = db.execute(
             select(Chunk).join(Document, Chunk.document_id == Document.id)
@@ -207,18 +216,25 @@ Chunk:
             self._ensure_source_profile(db, src, ai)
             db.commit()
 
+        # Merge repeated text before paying for embeddings or decisions on it.
+        with session_scope() as db:
+            job = db.get(Job, job_id); src = db.get(Source, job.source_id)
+            job.stage = "dedupe"
+            mark_duplicates(db, src)
+            db.commit()
+
         with session_scope() as db:
             job = db.get(Job, job_id); src = db.get(Source, job.source_id)
             chunk_rows = db.execute(
                 select(Chunk).join(Document, Chunk.document_id == Document.id)
-                .where(Document.source_id == src.id).order_by(Chunk.id)
+                .where(Document.source_id == src.id, Chunk.duplicate_of_id.is_(None)).order_by(Chunk.id)
             ).scalars().all()
-            job.stage = "index"; job.progress_total = len(chunk_rows); db.commit()
+            job.stage = "index"; job.progress_current = 0; job.progress_total = len(chunk_rows); db.commit()
             chunk_ids = [c.id for c in chunk_rows]
-        contextualize_enabled = settings.contextual_indexing and len(chunk_ids) <= settings.contextual_indexing_max_chunks
+        contextualize_enabled = (settings.contextual_indexing and is_automatic(ai)
+                                 and len(chunk_ids) <= settings.contextual_indexing_max_chunks)
 
-        # Batch embedding requests to minimize free-tier API calls. Grouping remains per chunk,
-        # but most assignments use centroid similarity without an LLM.
+        # Batch embedding requests to minimize free-tier API calls.
         for batch_start in range(0, len(chunk_ids), settings.embedding_batch_size):
             batch_ids = chunk_ids[batch_start:batch_start + settings.embedding_batch_size]
             with session_scope() as db:
@@ -238,38 +254,46 @@ Chunk:
                     for chunk, emb in zip(pending, vectors):
                         chunk.embedding_json = json.dumps(emb)
                         chunk.embedding_status = "done"
-                for chunk in chunks:
-                    if chunk.classification_status != "done":
-                        emb = json.loads(chunk.embedding_json)
-                        group, confidence = choose_group(db, ai, chunk, emb, self._source_hint(src), settings.group_similarity_threshold)
-                        chunk.group_id = group.id
-                        chunk.group_confidence = confidence
-                        chunk.classification_status = "done"
-                        members = db.execute(select(Chunk.id).where(Chunk.group_id == group.id, Chunk.embedding_status == "done")).all()
-                        group.centroid_json = json.dumps(merge_centroid(json.loads(group.centroid_json) if group.centroid_json else None, emb, len(members)))
                 job.progress_current = min(batch_start + len(batch_ids), len(chunk_ids))
-                job.checkpoint = f"chunk:{job.progress_current}/{len(chunk_ids)}"
-                job.stage = "organize"
+                job.checkpoint = f"embed:{job.progress_current}/{len(chunk_ids)}"
                 db.commit()
 
-        # Concept extraction is performed once per semantic group, not once per chunk.
+        # One organize decision per batch: groups named from content plus per-excerpt concepts.
+        # A batch commits only after its decision is applied, so a pause or crash replays it intact.
+        while True:
+            with session_scope() as db:
+                job = db.get(Job, job_id); src = db.get(Source, job.source_id)
+                own = (Document.source_id == src.id, Chunk.duplicate_of_id.is_(None), Chunk.embedding_status == "done")
+                batch = db.execute(
+                    select(Chunk).join(Document, Chunk.document_id == Document.id)
+                    .where(*own, Chunk.classification_status != "done").order_by(Chunk.id).limit(settings.organize_batch_size)
+                ).scalars().all()
+                if batch:
+                    organize_batch(db, ai, src, batch, self._source_hint(src))
+                    db.flush()
+                done, total = db.execute(
+                    select(func.count(Chunk.id).filter(Chunk.classification_status == "done"), func.count(Chunk.id))
+                    .join(Document, Chunk.document_id == Document.id).where(*own)
+                ).one()
+                job.stage = "organize"; job.progress_current = done; job.progress_total = total
+                job.checkpoint = f"organize:{done}/{total}"
+                db.commit()
+                if not batch:
+                    break
+
+        # Merged duplicates follow their canonical chunk into its group.
         with session_scope() as db:
             job = db.get(Job, job_id); src = db.get(Source, job.source_id)
-            group_ids = [row[0] for row in db.execute(
-                select(Chunk.group_id).join(Document, Chunk.document_id == Document.id)
-                .where(Document.source_id == src.id, Chunk.group_id.is_not(None))
-                .distinct()
-            ).all()]
-            job.stage = "concepts"; job.progress_current = 0; job.progress_total = len(group_ids); db.commit()
-        for i, group_id in enumerate(group_ids, 1):
-            with session_scope() as db:
-                job = db.get(Job, job_id); group = db.get(Group, group_id)
-                if group:
-                    extract_group_concepts(db, ai, group)
-                    db.query(Chunk).filter(Chunk.group_id == group.id).update({"cluster_status": "done"}, synchronize_session=False)
-                job.progress_current = i
-                job.checkpoint = f"group:{i}/{len(group_ids)}"
-                db.commit()
+            duplicates = db.execute(
+                select(Chunk).join(Document, Chunk.document_id == Document.id)
+                .where(Document.source_id == src.id, Chunk.duplicate_of_id.is_not(None))
+            ).scalars().all()
+            for chunk in duplicates:
+                canonical = db.get(Chunk, chunk.duplicate_of_id)
+                if canonical and canonical.group_id:
+                    chunk.group_id = canonical.group_id
+                    chunk.classification_status = "merged"
+            db.commit()
 
         with session_scope() as db:
             job = db.get(Job, job_id); src = db.get(Source, job.source_id)

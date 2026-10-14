@@ -111,6 +111,14 @@ def chunk_text(text: str, size: int = 1800, overlap: int = 220) -> list[str]:
     return [x for x in out if x]
 
 
+def strip_overlap(prev: str, nxt: str, max_overlap: int) -> str:
+    """Drop the overlap `chunk_text` copies from the previous chunk, leaving the chunk's own text."""
+    for k in range(min(len(prev), len(nxt), max_overlap), 15, -1):
+        if nxt.startswith(prev[-k:]):
+            return nxt[k:].lstrip()
+    return nxt
+
+
 def parse_file(path: Path) -> list[RawDocument]:
     suffix = path.suffix.lower()
     if suffix == ".pdf":

@@ -16,6 +16,10 @@
 - Group-aware study retrieval.
 - Copy-paste study-pack endpoint for external AI tutors.
 - Local fallback provider for offline unit tests.
+- Manual paste-back decisions with job pause/resume.
+- Near-duplicate chunk merging within a course.
+- Batched organize decisions with content-named groups and per-excerpt concepts.
+- Saved syllabus topics with status, kickoff/start/skip/next tutor flow.
 
 ## Not claimed as production-complete
 

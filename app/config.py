@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/app.db"
     upload_dir: str = "./data/uploads"
 
+    # auto: Gemini when GEMINI_API_KEY is set, otherwise manual.
+    # manual: every model decision becomes a prompt the user answers with an external AI.
+    # local: offline deterministic fallbacks only (no decisions, no generation).
+    ai_mode: str = "auto"
+
     gemini_api_key: str | None = None
     gemini_reasoning_model: str = "gemini-3.8-flash"
     gemini_fast_model: str = "gemini-3.5-flash-lite"
@@ -25,9 +30,13 @@ class Settings(BaseSettings):
     contextual_indexing: bool = False
     contextual_indexing_max_chunks: int = 80
     group_similarity_threshold: float = 0.78
-    group_candidates: int = 8
-    group_llm_validation: bool = True
     concept_extraction: bool = True
+    duplicate_threshold: float = 0.9
+    organize_batch_size: int = 40
+    organize_excerpt_chars: int = 700
+    organize_group_limit: int = 40
+
+    study_part_chars: int = 15000
 
     dense_candidate_k: int = 24
     lexical_candidate_k: int = 24

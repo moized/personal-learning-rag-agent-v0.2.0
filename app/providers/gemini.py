@@ -6,6 +6,7 @@ import httpx
 
 class GeminiProvider:
     """Gemini REST client with task-aware model routing and automatic fallback."""
+    mode = "gemini"
 
     def __init__(
         self,
@@ -77,7 +78,8 @@ class GeminiProvider:
             raise RuntimeError("Gemini returned empty text")
         return text
 
-    def generate_text(self, prompt: str, task: str = "study") -> str:
+    def generate_text(self, prompt: str, task: str = "study", *,
+                      key: str | None = None, label: str | None = None) -> str:
         errors = []
         for model in self._model_order(task):
             level = self.reasoning_level if model == self.reasoning_model else self.fast_thinking_level
@@ -87,7 +89,8 @@ class GeminiProvider:
                 errors.append(f"{model}: {exc}")
         raise RuntimeError("All Gemini text models failed: " + " | ".join(errors))
 
-    def generate_json(self, prompt: str, task: str = "extraction", schema: dict | None = None) -> dict:
+    def generate_json(self, prompt: str, task: str = "extraction", schema: dict | None = None, *,
+                      key: str | None = None, label: str | None = None) -> dict:
         # A schema makes machine-readable agent decisions deterministic when the API supports it.
         effective_schema = schema or {
             "type": "object",

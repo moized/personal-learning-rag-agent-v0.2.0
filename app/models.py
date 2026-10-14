@@ -77,6 +77,9 @@ class Chunk(Base):
     cluster_status: Mapped[str] = mapped_column(String(30), default="pending")
     group_id: Mapped[int | None] = mapped_column(ForeignKey("groups.id"), nullable=True, index=True)
     group_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Near-identical text already stored in the same course; the earlier chunk is kept as canonical.
+    duplicate_of_id: Mapped[int | None] = mapped_column(ForeignKey("chunks.id"), nullable=True, index=True)
+    dedupe_status: Mapped[str] = mapped_column(String(30), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     __table_args__ = (UniqueConstraint("document_id", "chunk_index", name="uq_document_chunk"),)
 
@@ -113,5 +116,50 @@ class Job(Base):
     checkpoint: Mapped[str | None] = mapped_column(String(500), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    waiting_decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class Decision(Base):
+    """A model decision handed to the user to answer with an external AI (manual mode)."""
+    __tablename__ = "decisions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(255), unique=True)
+    task: Mapped[str] = mapped_column(String(50))
+    kind: Mapped[str] = mapped_column(String(10), default="json")
+    label: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    prompt: Mapped[str] = mapped_column(Text)
+    schema_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id"), nullable=True, index=True)
+    action: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    action_args_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Syllabus(Base):
+    __tablename__ = "syllabi"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    course_id: Mapped[int | None] = mapped_column(ForeignKey("courses.id"), nullable=True, index=True)
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class SyllabusTopic(Base):
+    __tablename__ = "syllabus_topics"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    syllabus_id: Mapped[int] = mapped_column(ForeignKey("syllabi.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(20), default="topic")  # topic | extra (material no topic claimed)
+    title: Mapped[str] = mapped_column(String(500))
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prerequisites_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    concepts_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    groups_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending")  # pending | in_progress | done | skipped
+    parts_sent: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

@@ -4,8 +4,8 @@ from ..models import Source, Job
 
 def initial_plan(source_type: str) -> list[str]:
     if source_type == "youtube":
-        return ["structure", "transcript", "index", "organize", "curriculum_refresh"]
-    return ["structure", "index", "organize", "curriculum_refresh"]
+        return ["structure", "transcript", "dedupe", "index", "organize"]
+    return ["structure", "dedupe", "index", "organize"]
 
 
 def set_plan(job: Job, source: Source) -> None:

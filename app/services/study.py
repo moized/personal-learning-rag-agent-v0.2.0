@@ -2,13 +2,13 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from ..models import Chunk, Document, Source
-from ..providers.base import AIProvider
+from ..providers.base import AIProvider, is_automatic
 from ..config import settings
 from .retrieval import retrieve, group_candidates
 
 
 def plan_query(ai: AIProvider, question: str) -> dict:
-    if not settings.use_llm_query_planner:
+    if not settings.use_llm_query_planner or not is_automatic(ai):
         return {"search_queries": [question], "intent": "study"}
     prompt = f"""Turn this learning question into 1-3 retrieval queries that preserve exact technical terminology.
 Do not answer the question. Avoid generic rewrites.
@@ -63,8 +63,11 @@ Question: {question}
 Evidence:
 {context}
 """
+    automatic = is_automatic(ai)
     return {
-        "answer": ai.generate_text(prompt, task="study"),
+        # Without an API, the evidence-filled prompt is returned for the user's external AI.
+        "answer": ai.generate_text(prompt, task="study") if automatic else None,
+        "prompt": None if automatic else prompt,
         "sources": [{"chunk_id": c.id, "score": s} for c, s in primary],
         "selected_group_ids": selected_groups,
         "query_plan": query_plan,

@@ -39,4 +39,4 @@ LLM_task_breakdown
 processing_seconds
 ```
 
-The expected optimization is to make embedding batch calls and group-level concept extraction dominate the background pipeline rather than one LLM call per chunk.
+The expected optimization is to make embedding batch calls and batched organize decisions (groups plus concepts per ~40 excerpts) dominate the background pipeline rather than one LLM call per chunk.

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from ..models import Chunk, Document, Source, Group
-from ..providers.base import AIProvider
+from ..providers.base import AIProvider, is_automatic
 from ..config import settings
 from .grouping import cosine
 
@@ -131,7 +131,7 @@ def _lexical_rank(question: str, chunks: list[Chunk], limit: int) -> list[tuple[
 
 
 def _llm_rerank(ai: AIProvider, question: str, candidates: list[tuple[Chunk, float]], final_k: int) -> list[tuple[Chunk, float]]:
-    if not settings.use_llm_reranker or not candidates:
+    if not settings.use_llm_reranker or not candidates or not is_automatic(ai):
         return candidates[:final_k]
     blocks = []
     for chunk, fused in candidates:

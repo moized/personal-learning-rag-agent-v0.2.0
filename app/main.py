@@ -1,16 +1,20 @@
 import json
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl, Field
 from sqlalchemy import select
 from .config import settings
 from .db import init_db, session_scope
-from .models import Source, Job, Group, Course, Chunk, Document
+from .models import Source, Job, Group, Course, Chunk, Document, Decision, SyllabusTopic, Syllabus
 from .services.files import save_upload, save_text_content
 from .services.queue import enqueue
 from .services.worker import Worker
-from .providers.factory import provider
+from .providers.base import DecisionPending
+from .providers.factory import provider, ai_mode
 from .services.study import answer
-from .services.curriculum import build_syllabus, build_study_pack_prompt
+from .services.curriculum import generate_syllabus, get_syllabus, build_study_pack_prompt
+from .services.decisions import record_decision, submit_answer, requeue_waiting_jobs, serialize
+from .services.tutor import kickoff_message, next_message, part_message, parse_start_reply, set_topic_status, start_session, topic_overview
 from .services.ingestion import parse_structured_literal, clean_caption_text
 
 app = FastAPI(title=settings.app_name)
@@ -28,6 +32,26 @@ class StudyPackRequest(BaseModel):
     topic: str
     course_id: int | None = None
     top_k: int = Field(default=12, ge=1, le=30)
+
+
+class AnswerRequest(BaseModel):
+    answer: str
+
+
+class SyllabusRequest(BaseModel):
+    course_id: int | None = None
+
+
+class TopicStatusRequest(BaseModel):
+    status: str
+
+
+class StartRequest(BaseModel):
+    course_id: int | None = None
+    start: int | None = None
+    skip: list[int] = Field(default_factory=list)
+    # The tutor's "START: 3; SKIP: 5, 7" line pasted back; overrides start/skip when present.
+    reply: str | None = None
 
 
 class CourseRequest(BaseModel):
@@ -66,6 +90,7 @@ def shutdown():
 def health():
     return {
         "status": "ok",
+        "ai_mode": ai_mode(),
         "llm": bool(settings.gemini_api_key),
         "reasoning_model": settings.gemini_reasoning_model,
         "fast_model": settings.gemini_fast_model,
@@ -244,10 +269,145 @@ def study(req: StudyRequest):
         return answer(db, provider(), req.question, req.group_id, req.top_k, req.course_id)
 
 
+@app.get("/decisions")
+def decisions(status: str | None = "pending"):
+    with session_scope() as db:
+        stmt = select(Decision).order_by(Decision.id)
+        if status:
+            stmt = stmt.where(Decision.status == status)
+        return [serialize(d) for d in db.execute(stmt).scalars().all()]
+
+
+@app.get("/decisions/{decision_id}")
+def decision(decision_id: int):
+    with session_scope() as db:
+        d = db.get(Decision, decision_id)
+        if d is None:
+            raise HTTPException(404, "Decision not found")
+        return {**serialize(d), "answer": d.answer}
+
+
+@app.post("/decisions/{decision_id}/answer")
+def answer_decision(decision_id: int, req: AnswerRequest):
+    """Store the external AI's answer and resume whatever was waiting on it."""
+    with session_scope() as db:
+        try:
+            d = submit_answer(db, decision_id, req.answer)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, f"{exc}. Paste the AI's full reply (a JSON object).") from exc
+        requeued = requeue_waiting_jobs(db, d.id)
+        payload = serialize(d, with_prompt=False)
+        action, args = d.action, json.loads(d.action_args_json or "{}")
+    follow_up = None
+    if action == "syllabus":
+        follow_up = _syllabus_response(args.get("course_id"))
+        if isinstance(follow_up, JSONResponse):
+            follow_up = json.loads(follow_up.body)
+    return {"decision": payload, "requeued_jobs": requeued, "result": follow_up}
+
+
+def _pending_response(pending: DecisionPending, **context) -> JSONResponse:
+    with session_scope() as db:
+        d = record_decision(db, pending, **context)
+        body = {"status": "needs_decision", "decision": serialize(d),
+                "message": "Copy the prompt into your external AI, then paste its reply via POST /decisions/{id}/answer."}
+    return JSONResponse(status_code=202, content=body)
+
+
+def _syllabus_payload(db, course_id: int | None) -> dict:
+    s = get_syllabus(db, course_id)
+    if s is None:
+        return {"status": "missing", "syllabus": None, "topics": []}
+    return {"status": "ready", "syllabus_id": s.id, "syllabus": s.text, "topics": topic_overview(db, s)}
+
+
+def _syllabus_response(course_id: int | None):
+    try:
+        with session_scope() as db:
+            s = generate_syllabus(db, provider(), course_id)
+            if s is None:
+                return {"status": "empty", "syllabus": None, "topics": [],
+                        "message": "No organized learning material is available for this scope yet."}
+            db.flush()
+            return _syllabus_payload(db, course_id)
+    except DecisionPending as pending:
+        return _pending_response(pending, action="syllabus", action_args={"course_id": course_id})
+
+
 @app.get("/syllabus")
 def syllabus(course_id: int | None = None):
     with session_scope() as db:
-        return {"syllabus": build_syllabus(db, provider(), course_id)}
+        return _syllabus_payload(db, course_id)
+
+
+@app.post("/syllabus")
+def create_syllabus(req: SyllabusRequest):
+    """(Re)generate and store the outline. Topics whose title is unchanged keep their status."""
+    return _syllabus_response(req.course_id)
+
+
+@app.post("/syllabus/topics/{topic_id}/status")
+def topic_status(topic_id: int, req: TopicStatusRequest):
+    with session_scope() as db:
+        topic = db.get(SyllabusTopic, topic_id)
+        if topic is None:
+            raise HTTPException(404, "Topic not found")
+        try:
+            set_topic_status(db, topic, req.status)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"topic_id": topic.id, "status": topic.status}
+
+
+def _require_syllabus(db, course_id: int | None):
+    s = get_syllabus(db, course_id)
+    if s is None:
+        raise HTTPException(409, "Generate the study outline first (POST /syllabus).")
+    return s
+
+
+@app.get("/tutor/kickoff")
+def tutor_kickoff(course_id: int | None = None):
+    """First message for the external AI: the outline plus 'ask me where to start'."""
+    with session_scope() as db:
+        return {"text": kickoff_message(db, _require_syllabus(db, course_id))}
+
+
+@app.post("/tutor/start")
+def tutor_start(req: StartRequest):
+    """Record where the user starts and what they skip, then return the first part to paste."""
+    start, skip = (parse_start_reply(req.reply) if req.reply else (req.start, req.skip))
+    if req.reply and start is None and not skip:
+        raise HTTPException(400, "Could not find a 'START: n' or 'SKIP: ...' line in the reply.")
+    with session_scope() as db:
+        s = _require_syllabus(db, req.course_id)
+        try:
+            start_session(db, s, start, skip)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        db.flush()
+        return {"start": start, "skip": skip, **next_message(db, s)}
+
+
+@app.post("/tutor/next")
+def tutor_next(req: SyllabusRequest):
+    with session_scope() as db:
+        return next_message(db, _require_syllabus(db, req.course_id))
+
+
+@app.get("/tutor/topics/{topic_id}/parts/{part}")
+def tutor_part(topic_id: int, part: int):
+    """Re-send one part of a topic without changing progress."""
+    with session_scope() as db:
+        topic = db.get(SyllabusTopic, topic_id)
+        if topic is None:
+            raise HTTPException(404, "Topic not found")
+        try:
+            return part_message(db, db.get(Syllabus, topic.syllabus_id), topic_id, part)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
 
 @app.post("/study-pack")
@@ -273,4 +433,5 @@ def course_stats(course_id: int):
             "embedded": sum(c.embedding_status == "done" for c in chunks),
             "grouped": sum(c.classification_status == "done" for c in chunks),
             "concept_indexed": sum(c.cluster_status == "done" for c in chunks),
+            "merged_duplicates": sum(c.duplicate_of_id is not None for c in chunks),
         }

@@ -32,7 +32,7 @@ def _migrate_sqlite() -> None:
         "metadata_json": "metadata_json TEXT",
         "profile_json": "profile_json TEXT",
     })
-    _add_missing_columns("jobs", {"plan_json": "plan_json TEXT"})
+    _add_missing_columns("jobs", {"plan_json": "plan_json TEXT", "waiting_decision_id": "waiting_decision_id INTEGER"})
     _add_missing_columns("groups", {"keywords_json": "keywords_json TEXT"})
     _add_missing_columns("documents", {"summary": "summary TEXT"})
     _add_missing_columns("chunks", {
@@ -40,6 +40,9 @@ def _migrate_sqlite() -> None:
         "contextual_text": "contextual_text TEXT",
         "token_estimate": "token_estimate INTEGER DEFAULT 0",
         "group_confidence": "group_confidence FLOAT",
+        "duplicate_of_id": "duplicate_of_id INTEGER",
+        # Rows that predate deduplication become canonical text new uploads are compared with.
+        "dedupe_status": "dedupe_status VARCHAR(30) DEFAULT 'done'",
     })
     _add_missing_columns("concepts", {"aliases_json": "aliases_json TEXT"})
 

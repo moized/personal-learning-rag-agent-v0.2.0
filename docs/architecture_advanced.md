@@ -29,17 +29,14 @@ This project is intentionally more sophisticated than a basic `embed -> similari
                          |
                Context-enriched chunks
                          |
+               Near-duplicate merging
+                         |
                Batched Gemini Embedding
                          |
-               Semantic Group Routing
-               /                    \\
-        centroid fast-path      LLM validation
-               \                    /
-                +------------------+
+        Batched organize decision (per ~40 excerpts)
+          groups named from content + concept tags
                          |
-                    Knowledge Groups
-                         |
-                Group-level Concepts
+            Knowledge Groups + Concepts
                          |
                    Course Curriculum
                          |
@@ -162,32 +159,28 @@ A bad classification therefore reduces noise without making relevant information
 
 ## 8. Semantic grouping
 
-New chunks are not compared against every existing chunk.
-
-Instead:
+Grouping uses one model decision per batch of about 40 excerpts:
 
 ```text
-chunk embedding
-   -> nearest group centroids
-   -> strong-margin deterministic assignment
-   -> LLM validation only when ambiguous
+batch of excerpts
+   -> existing groups shown (all, or the 40 closest centroids) with their concepts
+   -> one decision: excerpt -> existing or new content-named group
+   -> centroid update per touched group
 ```
 
-This keeps grouping cheap as the number of chunks grows.
+In manual mode this is one paste per batch rather than one per ambiguous chunk. Excerpts left out of an answer fall back to the nearest centroid, then to the neighbouring excerpt's group.
 
 ## 9. Concept extraction
 
-Concept extraction is **group-level**, not one LLM call per chunk.
-
-That change is deliberate:
+Concepts are tagged per excerpt inside the same organize decision, so evidence links point at the chunks that actually teach each concept:
 
 ```text
 1000 chunks -> potentially 1000 extraction calls   [bad]
 
-1000 chunks -> 15 semantic groups -> ~15 extraction calls [much better]
+1000 chunks -> 25 organize decisions (groups + concepts together) [much better]
 ```
 
-Representative evidence snippets are used to build the concept index and a small number of high-signal evidence links are retained.
+New names are matched against existing concepts and their aliases. The syllabus decision can additionally report synonyms, which are merged into one concept.
 
 ## 10. Durable execution
 
