@@ -244,7 +244,11 @@ def set_topic_status(db: Session, topic: SyllabusTopic, status: str) -> None:
 
 
 def start_session(db: Session, syllabus: Syllabus, start: int | None, skip: list[int]) -> None:
-    """Apply the user's choice: topics before `start` and those in `skip` are skipped; the rest are queued."""
+    """Apply the user's choice: topics before `start` and those in `skip` are skipped.
+
+    Skipping only ever adds: topics the student already skipped in their plan stay skipped
+    (the tutor's line may say "SKIP: none"); they come back through the plan's Include.
+    """
     topics, _, _ = _material(db, syllabus)
     if start is not None and not 1 <= start <= len(topics):
         raise ValueError(f"START must be between 1 and {len(topics)}")
@@ -254,8 +258,6 @@ def start_session(db: Session, syllabus: Syllabus, start: int | None, skip: list
             continue
         if (start is not None and number < start) or number in skip_set:
             set_topic_status(db, topic, "skipped")
-        elif topic.status == "skipped":
-            set_topic_status(db, topic, "pending")
 
 
 def part_message(db: Session, syllabus: Syllabus, topic_id: int, part: int) -> dict:

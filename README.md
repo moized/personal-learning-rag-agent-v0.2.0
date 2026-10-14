@@ -61,7 +61,7 @@ In manual mode a job that needs a decision shows status `waiting`. A **Needs you
 1. **Add material.** Each source is split into pieces, repeated text is merged into the earlier copy, and the remaining pieces are organized into groups and concepts.
 2. **Generate the study outline** (`POST /syllabus`). It is saved with numbered topics; every piece of the course belongs to exactly one topic. Regenerating keeps the status of topics whose title did not change.
 3. **Kickoff** (`GET /tutor/kickoff`). Paste this into a new chat. It gives the AI the outline and tells it to ask you where to start and what to skip, and to answer with a line like `START: 3; SKIP: 5, 7`.
-4. **Start** (`POST /tutor/start`). Paste that line back (or pick the start topic and skips yourself). Earlier and skipped topics are marked `skipped`, and you get the first message to paste.
+4. **Start** (`POST /tutor/start`). Paste that line back (or pick the start topic and skips yourself). Earlier and listed topics are marked `skipped` (topics already skipped in the plan stay skipped), and you get the first message to paste.
 5. **Next** (`POST /tutor/next`). Each call returns the next topic, or the next part of a long topic, as verbatim excerpts in reading order, and records it as sent. Topics move through `pending → in_progress → done`; you can set any topic back to `pending` or `skipped` (`POST /syllabus/topics/{id}/status`), and `GET /tutor/topics/{id}/parts/{n}` re-sends a part without changing progress.
 
 ## Model configuration

@@ -130,7 +130,12 @@ def test_manual_mode_from_source_to_one_topic_at_a_time(db, tmp_path, small_chun
     assert client.get("/tutor/current", params={"course_id": course.id}).json() == {"current": None}
 
     # 5. The user pastes the tutor's decision back: start at 2 and skip nothing.
+    # Topic 3 skipped in the plan stays skipped even though the tutor's line says "SKIP: none".
+    client.post(f"/syllabus/topics/{topics[2]['id']}/status", json={"status": "skipped"})
     first = client.post("/tutor/start", json={"course_id": course.id, "reply": "Great choice.\nSTART: 2; SKIP: none"}).json()
+    assert [t["status"] for t in client.get("/syllabus", params={"course_id": course.id}).json()["topics"]] == [
+        "skipped", "done", "skipped"]
+    client.post(f"/syllabus/topics/{topics[2]['id']}/status", json={"status": "pending"})
     assert first["number"] == 2 and first["part"] == 1 and first["parts"] == 1
     assert first["text"].startswith("TOPIC 2 of 3 — Dense retrieval")
     assert "Builds on: topic 1 (Lexical retrieval)" in first["text"]
