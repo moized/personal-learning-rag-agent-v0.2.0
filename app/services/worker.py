@@ -1,4 +1,5 @@
 import json
+import math
 import re
 import threading
 import time
@@ -64,6 +65,13 @@ class Worker(threading.Thread):
                             src.status = "failed"
                             src.error = str(exc)
                 time.sleep(min(2 ** max(job.retry_count - 1, 0), 30))
+
+    @staticmethod
+    def _organize_counts(db, own) -> tuple[int, int]:
+        return tuple(db.execute(
+            select(func.count(Chunk.id).filter(Chunk.classification_status == "done"), func.count(Chunk.id))
+            .join(Document, Chunk.document_id == Document.id).where(*own)
+        ).one())
 
     def _source_hint(self, src: Source) -> str | None:
         pieces = [src.topic_hint, src.domain_hint, src.description]
@@ -269,12 +277,12 @@ Chunk:
                     .where(*own, Chunk.classification_status != "done").order_by(Chunk.id).limit(settings.organize_batch_size)
                 ).scalars().all()
                 if batch:
-                    organize_batch(db, ai, src, batch, self._source_hint(src))
+                    done, total = self._organize_counts(db, own)
+                    size = settings.organize_batch_size
+                    part = (done // size + 1, done // size + math.ceil((total - done) / size))
+                    organize_batch(db, ai, src, batch, self._source_hint(src), part)
                     db.flush()
-                done, total = db.execute(
-                    select(func.count(Chunk.id).filter(Chunk.classification_status == "done"), func.count(Chunk.id))
-                    .join(Document, Chunk.document_id == Document.id).where(*own)
-                ).one()
+                done, total = self._organize_counts(db, own)
                 job.stage = "organize"; job.progress_current = done; job.progress_total = total
                 job.checkpoint = f"organize:{done}/{total}"
                 db.commit()

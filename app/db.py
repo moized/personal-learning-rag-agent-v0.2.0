@@ -45,6 +45,7 @@ def _migrate_sqlite() -> None:
         "dedupe_status": "dedupe_status VARCHAR(30) DEFAULT 'done'",
     })
     _add_missing_columns("concepts", {"aliases_json": "aliases_json TEXT"})
+    _add_missing_columns("syllabi", {"last_topic_id": "last_topic_id INTEGER", "last_part": "last_part INTEGER"})
 
 
 def init_db() -> None:

@@ -58,9 +58,16 @@ def test_manual_mode_from_source_to_one_topic_at_a_time(db, tmp_path, small_chun
     assert decision is not None and db.get(Job, job1.id).status == "waiting"
     pending = client.get("/decisions").json()
     assert [d["id"] for d in pending] == [decision.id]
-    assert "Organize 'Lecture 1'" in pending[0]["label"]
+    assert pending[0]["label"] == 'Sort "Lecture 1" into topics'
     assert excerpts(pending[0]["prompt"]) == [1, 2]
     assert "Reply with only a JSON object" in pending[0]["prompt"]
+
+    material = client.get(f"/courses/{course.id}/sources").json()
+    assert [(m["name"], m["state"], m["step"], m["decision_id"]) for m in material] == [
+        ("Lecture 1", "needs_help", "Waiting for your AI's answer", decision.id),
+        ("Lecture 2", "queued", "Waiting in line", None)]
+    assert [d["source_id"] for d in client.get("/decisions", params={"course_id": course.id}).json()] == [src1.id]
+    assert client.get("/decisions", params={"course_id": course.id + 1}).json() == []
 
     # A malformed paste is rejected without losing the decision.
     assert client.post(f"/decisions/{decision.id}/answer", json={"answer": "group 1 please"}).status_code == 400
@@ -91,6 +98,8 @@ def test_manual_mode_from_source_to_one_topic_at_a_time(db, tmp_path, small_chun
     lexical = db.query(Group).filter_by(name="Lexical retrieval").one()
     assert recap.group_id == lexical.id and recap.classification_status == "merged"
     assert client.get(f"/courses/{course.id}/stats").json()["merged_duplicates"] == 1
+    assert [m["summary"] for m in client.get(f"/courses/{course.id}/sources").json()] == [
+        "2 passages", "1 passage, 1 repeated passage merged"]
 
     # 3. The study outline is one more decision; answering it finishes the syllabus.
     assert client.get("/syllabus", params={"course_id": course.id}).json()["status"] == "missing"
@@ -98,6 +107,8 @@ def test_manual_mode_from_source_to_one_topic_at_a_time(db, tmp_path, small_chun
     assert response.status_code == 202
     outline_decision = response.json()["decision"]
     assert "## Lexical retrieval" in outline_decision["prompt"]
+    assert outline_decision["label"] == "Plan the study outline for Retrieval"
+    assert client.get("/decisions", params={"course_id": course.id}).json()[0]["course_id"] == course.id
     outline = {"topics": [
         {"title": "Lexical retrieval", "purpose": "Rank by terms.", "groups": ["Lexical retrieval"], "concepts": ["BM25"]},
         {"title": "Dense retrieval", "purpose": "Rank by meaning.", "prerequisites": [1], "groups": ["Dense retrieval"], "concepts": ["Embedding"]},
@@ -114,6 +125,10 @@ def test_manual_mode_from_source_to_one_topic_at_a_time(db, tmp_path, small_chun
     assert "2. Dense retrieval — Rank by meaning. (builds on 1)" in kickoff
     assert "ask me where I want to start" in kickoff and "START: 3; SKIP: 5, 7" in kickoff
 
+    plan = client.get("/syllabus", params={"course_id": course.id}).json()
+    assert plan["started"] is False and plan["outdated"] is False
+    assert client.get("/tutor/current", params={"course_id": course.id}).json() == {"current": None}
+
     # 5. The user pastes the tutor's decision back: start at 2 and skip nothing.
     first = client.post("/tutor/start", json={"course_id": course.id, "reply": "Great choice.\nSTART: 2; SKIP: none"}).json()
     assert first["number"] == 2 and first["part"] == 1 and first["parts"] == 1
@@ -121,6 +136,11 @@ def test_manual_mode_from_source_to_one_topic_at_a_time(db, tmp_path, small_chun
     assert "Builds on: topic 1 (Lexical retrieval)" in first["text"]
     # Verbatim material without the overlap copied from the BM25 chunk, which belongs to topic 1.
     assert DENSE in first["text"] and "technical terms" not in first["text"]
+    assert "[chunk" not in first["text"]
+    # A reload shows the same part again without advancing.
+    current = client.get("/tutor/current", params={"course_id": course.id}).json()["current"]
+    assert (current["number"], current["part"], current["text"]) == (2, 1, first["text"])
+    assert client.get("/syllabus", params={"course_id": course.id}).json()["started"] is True
 
     assert client.post("/tutor/start", json={"course_id": course.id, "start": 9}).status_code == 400
     assert client.post("/tutor/start", json={"course_id": course.id, "reply": "Let's begin!"}).status_code == 400
@@ -169,3 +189,19 @@ def test_parse_start_reply_and_part_splitting(monkeypatch):
     monkeypatch.setattr(settings, "study_part_chars", 25)
     assert _parts(["a" * 20, "b" * 20, "c" * 5]) == [["a" * 20], ["b" * 20], ["c" * 5]]
     assert _parts([]) == [[]]
+
+
+def test_finishing_clears_the_current_part(db, tmp_path, small_chunks, monkeypatch, scripted):
+    from app.services import curriculum, tutor
+    course = add_course(db)
+    src, job = add_transcript(db, tmp_path, course, "Lecture 1", [BM25])
+    ai = scripted(organize=lambda p: {"assignments": [{"excerpt": n, "group": "Retrieval"} for n in excerpts(p)]},
+                  syllabus=lambda p: {"topics": [{"title": "Retrieval", "purpose": "x", "groups": ["Retrieval"], "concepts": []}]})
+    monkeypatch.setattr("app.services.worker.provider", lambda: ai)
+    Worker().process_job(job.id)
+    syllabus = curriculum.generate_syllabus(db, ai, course.id)
+    first = tutor.next_message(db, syllabus)
+    # The last topic is sent: it stays the current part until the student presses Finish.
+    assert tutor.current_message(db, syllabus)["text"] == first["text"]
+    assert tutor.next_message(db, syllabus)["done"] is True
+    assert tutor.current_message(db, syllabus) is None

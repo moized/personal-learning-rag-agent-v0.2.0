@@ -25,15 +25,23 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# add GEMINI_API_KEY
+# optional: add GEMINI_API_KEY (without it you paste requests into your own AI)
 uvicorn app.main:app --reload
 ```
 
-In a second shell:
+Open http://localhost:8000. The student page is served by the same process; the API stays at the same address (interactive docs at `/docs`).
 
-```bash
-streamlit run frontend/app.py
-```
+## The student page
+
+The page walks a student through three steps:
+
+1. **Add material**: drop files, paste a transcript or notes (subtitle and JSON formats are detected automatically), or add a YouTube link. Each item shows a plain status: *Waiting in line*, *Reading your material*, *Checking for repeated content*, *Sorting it into topics*, *Needs your help*, *Ready* (with how many passages were kept and how many repeats were merged) or *Problem* with a **Try again** button.
+2. **Study plan**: create the plan, then skip topics you already know or bring them back. When new material arrives later, the page suggests updating the plan; progress is kept.
+3. **Study**: copy the first message into ChatGPT, Gemini or Claude, paste back the `START: …; SKIP: …` line the AI gives you, then copy one topic (or part) at a time and press **Next** when you're done with it.
+
+Whenever the AI's help is needed (manual mode), a **Needs your help** card appears where it matters: copy the request, open your AI, paste its whole reply back. Model names, chunk ids and other internals are not shown.
+
+The page is plain HTML, CSS and one JavaScript module in `frontend/` (no build step, no CDN, works offline), with light and dark themes and a phone-sized layout.
 
 ## AI modes
 
@@ -46,7 +54,7 @@ streamlit run frontend/app.py
 | `manual` | You, by pasting prompts into ChatGPT / Gemini / Claude | Gemini if a key is set, else local hashing |
 | `local` | Offline fallbacks only (groups named after the source) | local hashing |
 
-In manual mode a job that needs a decision shows status `waiting`. Open **Decisions waiting for your external AI** in the UI (or `GET /decisions`), copy the prompt into your AI, paste its full reply back, and the job resumes from where it stopped. Replies wrapped in prose or code fences are accepted; a reply that is not valid JSON is rejected so you can paste it again.
+In manual mode a job that needs a decision shows status `waiting`. A **Needs your help** card appears on the page (or use `GET /decisions`), copy the prompt into your AI, paste its full reply back, and the job resumes from where it stopped. Replies wrapped in prose or code fences are accepted; a reply that is not valid JSON is rejected so you can paste it again.
 
 ## Studying with an external AI
 

@@ -133,7 +133,7 @@ def _blocks(db: Session, chunks: list[Chunk]) -> list[str]:
             label.append(doc.title)
         if doc and doc.section:
             label.append(doc.section)
-        header = f"--- {' › '.join(label)} [chunk {chunk.id}]"
+        header = f"--- {' › '.join(label)}"
         if also.get(chunk.id):
             header += f" (same text also in: {', '.join(also[chunk.id])})"
         # The overlap repeats the previous chunk, which is sent with this topic or another one.
@@ -273,6 +273,19 @@ def part_message(db: Session, syllabus: Syllabus, topic_id: int, part: int) -> d
     raise LookupError("Topic not found in this syllabus")
 
 
+def current_message(db: Session, syllabus: Syllabus) -> dict | None:
+    """The part handed out last, or None before the session starts (or if it no longer exists)."""
+    if not syllabus.last_topic_id or not syllabus.last_part:
+        return None
+    try:
+        message = part_message(db, syllabus, syllabus.last_topic_id, syllabus.last_part)
+    except LookupError:
+        return None
+    topics, _, _ = _material(db, syllabus)
+    message["remaining_topics"] = sum(1 for t in topics if t.status in {"pending", "in_progress"})
+    return {"done": False, **message}
+
+
 def next_message(db: Session, syllabus: Syllabus) -> dict:
     """Return the next part to paste and record it as sent."""
     topics, assigned, fallback = _material(db, syllabus)
@@ -281,6 +294,8 @@ def next_message(db: Session, syllabus: Syllabus) -> dict:
         current = next((t for t in topics if t.status == "in_progress"), None) or \
             next((t for t in topics if t.status == "pending"), None)
         if current is None:
+            # Nothing is being studied any more, so a reload shows the finished state.
+            syllabus.last_topic_id = syllabus.last_part = None
             return {"done": True, "text": None, "message": "Every topic is done or skipped."}
         number = topics.index(current) + 1
         parts = _parts(_blocks(db, assigned.get(current.id, [])))
@@ -291,6 +306,7 @@ def next_message(db: Session, syllabus: Syllabus) -> dict:
         text = _render_part(current, len(topics), number, part, len(parts), parts[part - 1], titles, current.id in fallback)
         current.parts_sent = part
         current.status = "done" if part == len(parts) else "in_progress"
+        syllabus.last_topic_id, syllabus.last_part = current.id, part
         remaining = sum(1 for t in topics if t.status in {"pending", "in_progress"})
         return {"done": False, "topic_id": current.id, "number": number, "title": current.title,
                 "part": part, "parts": len(parts), "remaining_topics": remaining, "text": text}

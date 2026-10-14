@@ -180,7 +180,7 @@ def generate_syllabus(db: Session, ai: AIProvider, course_id: int | None = None)
         return None
     result = ai.generate_json(
         build_syllabus_prompt(course, groups), task="syllabus", schema=SYLLABUS_SCHEMA,
-        label=f"Study outline for {course.name if course else 'all material'}",
+        label=f"Plan the study outline for {course.name if course else 'all your material'}",
     )
     result = result if isinstance(result, dict) else {}
     for item in result.get("duplicate_concepts") or []:

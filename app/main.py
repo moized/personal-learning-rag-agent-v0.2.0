@@ -1,6 +1,8 @@
 import json
+from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl, Field
 from sqlalchemy import select
 from .config import settings
@@ -14,7 +16,9 @@ from .providers.factory import provider, ai_mode
 from .services.study import answer
 from .services.curriculum import generate_syllabus, get_syllabus, build_study_pack_prompt
 from .services.decisions import record_decision, submit_answer, requeue_waiting_jobs, serialize
-from .services.tutor import kickoff_message, next_message, part_message, parse_start_reply, set_topic_status, start_session, topic_overview
+from .services.tutor import (current_message, kickoff_message, next_message, part_message, parse_start_reply,
+                             set_topic_status, start_session, topic_overview)
+from .services.overview import course_sources, decision_context, plan_outdated
 from .services.ingestion import parse_structured_literal, clean_caption_text
 
 app = FastAPI(title=settings.app_name)
@@ -269,13 +273,35 @@ def study(req: StudyRequest):
         return answer(db, provider(), req.question, req.group_id, req.top_k, req.course_id)
 
 
+@app.get("/courses/{course_id}/sources")
+def course_material(course_id: int):
+    """Each source with a plain-language status, for the student page."""
+    with session_scope() as db:
+        return course_sources(db, course_id)
+
+
+@app.post("/sources/{source_id}/retry")
+def retry_source(source_id: int):
+    with session_scope() as db:
+        src = db.get(Source, source_id)
+        job = db.execute(select(Job).where(Job.source_id == source_id).order_by(Job.id.desc())).scalars().first()
+        if src is None or job is None:
+            raise HTTPException(404, "Source not found")
+        if job.status != "failed":
+            raise HTTPException(409, "Only material that could not be processed can be retried.")
+        job.status, job.retry_count, job.error = "queued", 0, None
+        src.status, src.error = "queued", None
+        return {"source_id": src.id, "job_id": job.id, "status": "queued"}
+
+
 @app.get("/decisions")
-def decisions(status: str | None = "pending"):
+def decisions(status: str | None = "pending", course_id: int | None = None):
     with session_scope() as db:
         stmt = select(Decision).order_by(Decision.id)
         if status:
             stmt = stmt.where(Decision.status == status)
-        return [serialize(d) for d in db.execute(stmt).scalars().all()]
+        out = [{**serialize(d), **decision_context(db, d)} for d in db.execute(stmt).scalars().all()]
+        return [d for d in out if course_id is None or d["course_id"] == course_id]
 
 
 @app.get("/decisions/{decision_id}")
@@ -284,7 +310,7 @@ def decision(decision_id: int):
         d = db.get(Decision, decision_id)
         if d is None:
             raise HTTPException(404, "Decision not found")
-        return {**serialize(d), "answer": d.answer}
+        return {**serialize(d), **decision_context(db, d), "answer": d.answer}
 
 
 @app.post("/decisions/{decision_id}/answer")
@@ -320,7 +346,10 @@ def _syllabus_payload(db, course_id: int | None) -> dict:
     s = get_syllabus(db, course_id)
     if s is None:
         return {"status": "missing", "syllabus": None, "topics": []}
-    return {"status": "ready", "syllabus_id": s.id, "syllabus": s.text, "topics": topic_overview(db, s)}
+    topics = topic_overview(db, s)
+    return {"status": "ready", "syllabus_id": s.id, "syllabus": s.text, "topics": topics,
+            "started": any(t["status"] != "pending" or t["parts_sent"] for t in topics),
+            "outdated": plan_outdated(db, s)}
 
 
 def _syllabus_response(course_id: int | None):
@@ -391,6 +420,13 @@ def tutor_start(req: StartRequest):
         return {"start": start, "skip": skip, **next_message(db, s)}
 
 
+@app.get("/tutor/current")
+def tutor_current(course_id: int | None = None):
+    """The part handed out last (null before starting), so a reload shows where the student is."""
+    with session_scope() as db:
+        return {"current": current_message(db, _require_syllabus(db, course_id))}
+
+
 @app.post("/tutor/next")
 def tutor_next(req: SyllabusRequest):
     with session_scope() as db:
@@ -435,3 +471,7 @@ def course_stats(course_id: int):
             "concept_indexed": sum(c.cluster_status == "done" for c in chunks),
             "merged_duplicates": sum(c.duplicate_of_id is not None for c in chunks),
         }
+
+
+# The student web page. Mounted last so every API route above takes precedence.
+app.mount("/", StaticFiles(directory=Path(__file__).resolve().parent.parent / "frontend", html=True), name="ui")

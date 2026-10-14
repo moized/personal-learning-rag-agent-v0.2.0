@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Personal Learning Knowledge Agent</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M9 9h9a5 5 0 0 1 5 5v9H14a5 5 0 0 1-5-5z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#material" aria-label="Personal Learning, home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">Personal Learning</span>
+      </a>
+      <div class="course-switch" id="course-switch" hidden>
+        <label class="sr-only" for="course">Course</label>
+        <select id="course"></select>
+        <button class="btn btn-ghost" type="button" data-action="new-course">New course</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main" class="page" tabindex="-1">
+    <p class="loading" id="boot">Loading…</p>
+
+    <!-- First visit: no courses yet -->
+    <section id="welcome" class="welcome" hidden>
+      <h1>Turn your lectures and notes into a study plan</h1>
+      <p class="lead">Add your material, get an ordered list of topics, then study them one at a time with ChatGPT, Gemini or Claude.</p>
+      <ol class="how">
+        <li><span class="how-num">1</span><strong>Add material</strong><span>Slides, notes, books, transcripts or YouTube videos.</span></li>
+        <li><span class="how-num">2</span><strong>Get a study plan</strong><span>Repeated parts are merged and everything is sorted into topics.</span></li>
+        <li><span class="how-num">3</span><strong>Study with your AI</strong><span>Paste one topic at a time. Skip what you already know.</span></li>
+      </ol>
+      <form class="card welcome-form" data-form="create-course">
+        <label for="welcome-name">What are you studying?</label>
+        <div class="row">
+          <input id="welcome-name" name="name" required maxlength="200" placeholder="e.g. Machine Learning, Organic Chemistry" autocomplete="off">
+          <button class="btn btn-primary" type="submit">Create course</button>
+        </div>
+      </form>
+      <p class="mode-note" data-mode-note></p>
+    </section>
+
+    <!-- Working on a course -->
+    <section id="workspace" hidden>
+      <nav class="steps" role="tablist" aria-label="Steps">
+        <button class="step" role="tab" id="tab-material" aria-controls="panel-material" data-tab="material">
+          <span class="step-num">1</span><span class="step-label">Add material</span><span class="dot" hidden></span>
+        </button>
+        <button class="step" role="tab" id="tab-plan" aria-controls="panel-plan" data-tab="plan">
+          <span class="step-num">2</span><span class="step-label">Study plan</span><span class="dot" hidden></span>
+        </button>
+        <button class="step" role="tab" id="tab-study" aria-controls="panel-study" data-tab="study">
+          <span class="step-num">3</span><span class="step-label">Study</span><span class="dot" hidden></span>
+        </button>
+      </nav>
+
+      <!-- Step 1 -->
+      <section class="panel" id="panel-material" role="tabpanel" aria-labelledby="tab-material">
+        <div class="help-list" id="material-help"></div>
+
+        <div class="card">
+          <h2>Add material</h2>
+          <div class="segmented" role="tablist" aria-label="How to add material">
+            <button role="tab" type="button" data-add="upload" aria-selected="true">Upload files</button>
+            <button role="tab" type="button" data-add="paste" aria-selected="false">Paste text</button>
+            <button role="tab" type="button" data-add="video" aria-selected="false">YouTube</button>
+          </div>
+
+          <div data-add-panel="upload">
+            <label class="dropzone" id="dropzone">
+              <input type="file" id="file-input" multiple accept=".pdf,.docx,.txt,.md,.srt,.vtt,.json">
+              <span class="dropzone-icon" aria-hidden="true"></span>
+              <span><strong>Drop files here</strong> or <span class="link">choose files</span></span>
+              <span class="muted small">PDF, Word, text, Markdown and subtitle files</span>
+            </label>
+          </div>
+
+          <form data-add-panel="paste" data-form="add-paste" hidden>
+            <label for="paste-title">Title</label>
+            <input id="paste-title" name="title" maxlength="200" placeholder="e.g. Lecture 3: Hybrid search" autocomplete="off">
+            <label for="paste-text">Transcript or notes</label>
+            <textarea id="paste-text" name="text" rows="8" required placeholder="Paste a lecture transcript, subtitles or your notes"></textarea>
+            <button class="btn btn-primary" type="submit">Add text</button>
+          </form>
+
+          <form data-add-panel="video" data-form="add-video" hidden>
+            <label for="video-url">YouTube link</label>
+            <input id="video-url" name="url" type="url" required placeholder="https://www.youtube.com/watch?v=…" autocomplete="off">
+            <p class="muted small">Videos and playlists work when they have captions.</p>
+            <button class="btn btn-primary" type="submit">Add video</button>
+          </form>
+
+          <details class="hint">
+            <summary>Optional: say what it's about</summary>
+            <label for="topic-hint">Subject or topic</label>
+            <input id="topic-hint" maxlength="300" placeholder="e.g. Week 3, search engines" autocomplete="off">
+            <p class="muted small">This only helps with sorting. The content itself decides where things go.</p>
+          </details>
+        </div>
+
+        <div class="card">
+          <h2>Your material</h2>
+          <ul class="source-list" id="source-list"></ul>
+        </div>
+
+        <div id="material-next"></div>
+      </section>
+
+      <!-- Step 2 -->
+      <section class="panel" id="panel-plan" role="tabpanel" aria-labelledby="tab-plan" hidden>
+        <div class="help-list" id="plan-help"></div>
+        <div id="plan-body"></div>
+      </section>
+
+      <!-- Step 3 -->
+      <section class="panel" id="panel-study" role="tabpanel" aria-labelledby="tab-study" hidden>
+        <div id="study-body"></div>
+        <form class="card" data-form="ask">
+          <h2>Stuck on something?</h2>
+          <p class="muted" data-ask-note>Ask a question about your material.</p>
+          <label class="sr-only" for="ask-text">Your question</label>
+          <textarea id="ask-text" name="question" rows="3" required placeholder="e.g. Why do we combine keyword search with vector search?"></textarea>
+          <button class="btn" type="submit">Ask</button>
+          <div id="ask-result"></div>
+        </form>
+      </section>
+    </section>
+
+    <p class="mode-note" id="mode-footer" data-mode-note hidden></p>
+  </main>
+
+  <dialog id="course-dialog" aria-labelledby="course-dialog-title">
+    <form data-form="create-course">
+      <h2 id="course-dialog-title">New course</h2>
+      <label for="dialog-name">Course name</label>
+      <input id="dialog-name" name="name" required maxlength="200" placeholder="e.g. Statistics 101" autocomplete="off">
+      <div class="row end">
+        <button class="btn btn-ghost" type="button" data-action="close-dialog">Cancel</button>
+        <button class="btn btn-primary" type="submit">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>

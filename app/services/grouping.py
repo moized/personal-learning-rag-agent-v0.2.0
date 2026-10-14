@@ -347,7 +347,8 @@ def apply_organize(db: Session, src: Source, chunks: list[Chunk], embeddings: li
     return len(by_excerpt)
 
 
-def organize_batch(db: Session, ai: AIProvider, src: Source, chunks: list[Chunk], hint: str | None) -> int:
+def organize_batch(db: Session, ai: AIProvider, src: Source, chunks: list[Chunk], hint: str | None,
+                   part: tuple[int, int] | None = None) -> int:
     embeddings = [json.loads(c.embedding_json) for c in chunks]
     groups = candidate_groups(db, embeddings, settings.organize_group_limit)
     prompt = build_organize_prompt(db, src, hint, chunks, groups, settings.concept_extraction)
@@ -355,6 +356,6 @@ def organize_batch(db: Session, ai: AIProvider, src: Source, chunks: list[Chunk]
     result = ai.generate_json(
         prompt, task="organize", schema=organize_schema(settings.concept_extraction),
         key=f"source{src.id}:chunks{first}-{last}",
-        label=f"Organize '{src.name}' ({len(chunks)} excerpts, chunks {first}-{last})",
+        label=f'Sort "{src.name}" into topics' + (f" (part {part[0]} of {part[1]})" if part and part[1] > 1 else ""),
     )
     return apply_organize(db, src, chunks, embeddings, result)

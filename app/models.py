@@ -146,6 +146,9 @@ class Syllabus(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     course_id: Mapped[int | None] = mapped_column(ForeignKey("courses.id"), nullable=True, index=True)
     text: Mapped[str] = mapped_column(Text)
+    # The part most recently handed to the tutor, shown again when the study page reloads.
+    last_topic_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_part: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
