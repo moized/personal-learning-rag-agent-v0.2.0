@@ -18,7 +18,7 @@ from ..config import settings
 from ..models import (
     AgentTrace, Chunk, ChunkRelation, Concept, ConceptMastery, ConceptRelation, Course, Document, Evidence, Group, Job,
     LearnerEvent, MaintenanceJob, Misconception, PlanArrangement, QuizItem, Section, Source, SourceRelationship, SourceSpace, StudyPlan,
-    StudyPlanNode, StudyPosition, StudyProgress, TopicDetail,
+    StudyPlanNode, StudyPosition, StudyProgress, StudySkip, TopicDetail,
 )
 from .spaces import spaces_of
 
@@ -94,13 +94,14 @@ def forget_scope(db: Session, scope: str) -> None:
     db.execute(delete(StudyProgress).where(StudyProgress.scope_key == scope))
     db.execute(delete(StudyPosition).where(StudyPosition.scope_key == scope))
     db.execute(delete(PlanArrangement).where(PlanArrangement.scope_key == scope))
+    db.execute(delete(StudySkip).where(StudySkip.scope_key == scope))
 
 
 def forget_empty_scopes(db: Session) -> None:
     """Prepared sessions, progress and plans left for spaces (or All sources) that have no material any more."""
     scopes = set(db.execute(select(TopicDetail.scope_key)).scalars().all()) | set(db.execute(select(StudyProgress.scope_key)).scalars().all()) \
         | set(db.execute(select(StudyPlan.scope_key)).scalars().all()) | set(db.execute(select(StudyPosition.scope_key)).scalars().all()) \
-        | set(db.execute(select(PlanArrangement.scope_key)).scalars().all())
+        | set(db.execute(select(PlanArrangement.scope_key)).scalars().all()) | set(db.execute(select(StudySkip.scope_key)).scalars().all())
     for scope in scopes:
         if scope == "all":
             empty = db.execute(select(Source.id).limit(1)).first() is None

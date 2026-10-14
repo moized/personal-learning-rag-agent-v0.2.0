@@ -107,8 +107,8 @@ def test_the_master_prompt_follows_the_sessions_and_where_the_learner_left_off(u
     prompt = uenv.client.get("/plan/master-prompt", params={"course_id": course_id}).json()
     text = prompt["text"]
     assert prompt["next_topic"]["id"] == session and "The first topic is: The agent loop, two views." in text
-    assert "## My study sessions, in order\n1. The agent loop, two views: Agent Loop + Agent Loop Again\n2. Personal Brand [optional]" in text
-    assert "Agent Loop: Learn Agent Loop. [studied together: The agent loop, two views]" in text and "[optional]" in text
+    assert "## My study sessions, in order\n1. The agent loop, two views: Agent Loop (T1) + Agent Loop Again (T3)\n2. Personal Brand (T2) [optional]" in text
+    assert "Agent Loop (T1): Learn Agent Loop. [studied together: The agent loop, two views]" in text and "[optional]" in text
     _prepare(uenv, course_id, session)
     progress = uenv.client.get("/study-progress", params={"course_id": course_id}).json()
     assert progress["position"]["trail"] == [session]

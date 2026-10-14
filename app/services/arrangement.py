@@ -27,7 +27,7 @@ from ..models import Chunk, PlanArrangement, StudyPlan, StudyPlanNode, StudyProg
 from .coverage import plan_coverage
 from .plans import reading_order, scope_key
 from .profile import about_me_lines, get_profile
-from .progress import save_progress
+from .progress import save_progress, set_skipped, skipped_ids, start_at
 
 GROUP_PREFIX = "g-"
 MAX_IDEAS = 8
@@ -125,9 +125,47 @@ def session_payload(db: Session, plan: StudyPlan | None) -> list[dict] | None:
 
 # ------------------------------------------------------------------------ request
 
-def _code(study: list[StudyPlanNode]) -> str:
+def plan_code(study: list[StudyPlanNode]) -> str:
     """Names this version of the topic list, so a reply made for another one is not applied to it."""
     return hashlib.sha1(json.dumps([node.node_id for node in study]).encode()).hexdigest()[:8]
+
+
+_code = plan_code
+
+
+def aliases(study: list[StudyPlanNode]) -> dict[str, str]:
+    """The short id of each topic (T1, T2, ...) in the plan's reading order, used in requests and answers."""
+    return {node.node_id: f"T{number}" for number, node in enumerate(study, 1)}
+
+
+def topic_list(db: Session, plan: StudyPlan | None) -> list[StudyPlanNode]:
+    """The plan's study topics in reading order (what aliases number)."""
+    return _study(db, plan)[1]
+
+
+def skipped_topics(db: Session, scope: str, plan: StudyPlan | None) -> set[str]:
+    """Plan topics the learner skipped: on their own, or with a combined session they skipped."""
+    ids = skipped_ids(db, scope)
+    if not ids:
+        return set()
+    topics = {node_id for node_id in ids if not node_id.startswith(GROUP_PREFIX)}
+    if plan is not None and len(topics) < len(ids):
+        for session in sessions(db, plan):
+            if session.together and session.id in ids:
+                topics.update(session.topics)
+    return topics
+
+
+def is_skipped(db: Session, scope: str, node_id: str) -> bool:
+    """A topic skipped (itself or with its session), or a session all of whose topics are."""
+    plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope)).scalar_one_or_none()
+    topics = skipped_topics(db, scope, plan)
+    if not topics:
+        return False
+    if node_id in topics:
+        return True
+    session = next((s for s in sessions(db, plan) if s.id == node_id), None) if node_id.startswith(GROUP_PREFIX) else None
+    return session is not None and all(topic in topics for topic in session.topics)
 
 
 def _sizes(db: Session, study: list[StudyPlanNode], passages: dict[str, list[int]]) -> dict[str, int]:
@@ -203,10 +241,28 @@ Answer with only this JSON, with one entry per session in study order. Replace "
 MAX_STARTS = 200  # places a JSON object may start, tried from the end of the reply
 
 
-def _json_in(reply: str) -> dict:
-    """The arrangement in a reply, with or without a code fence or words around it. The last object that
-    names sessions with real topic ids wins, so a paste of the whole chat (the request's template first,
-    the AI's answer after it) still works. Each try parses forward from one "{", so this stays linear."""
+def _real(alias) -> bool:
+    text = str(alias or "").strip()
+    return bool(text) and text != "T?"
+
+
+def _is_arrangement(data: dict) -> bool:
+    if not isinstance(data.get("sessions"), list):
+        return False
+    return any(_real(t) for item in data["sessions"] if isinstance(item, dict) for t in item.get("topics") or [])
+
+
+def _is_start_and_skip(data: dict) -> bool:
+    skip = data.get("skip") if isinstance(data.get("skip"), list) else []
+    return "plan" in data and (_real(data.get("start")) or any(_real(alias) for alias in skip))
+
+
+def _json_in(reply: str, accept=_is_arrangement,
+             missing: str = "LearnOS could not find your AI's arrangement in that reply. Paste its whole answer.") -> dict:
+    """The answer in a reply, with or without a code fence or words around it. The last object that
+    `accept`s wins (placeholders like "T?" do not count), so a paste of the whole chat, with LearnOS's
+    template first and the AI's answer after it, still works. Each try parses forward from one "{", so
+    this stays linear."""
     text = reply or ""
     decoder = json.JSONDecoder()
     starts = [match.start() for match in re.finditer(r"\{", text)][-MAX_STARTS:]
@@ -215,12 +271,9 @@ def _json_in(reply: str) -> dict:
             data, _ = decoder.raw_decode(text, start)
         except ValueError:
             continue
-        if not isinstance(data, dict) or not isinstance(data.get("sessions"), list):
-            continue
-        topics = [str(t).strip() for item in data["sessions"] if isinstance(item, dict) for t in item.get("topics") or []]
-        if any(topic and topic != "T?" for topic in topics):
+        if isinstance(data, dict) and accept(data):
             return data
-    raise ArrangementError("LearnOS could not find your AI's arrangement in that reply. Paste its whole answer.")
+    raise ArrangementError(missing)
 
 
 def _flag(value) -> bool:
@@ -355,3 +408,41 @@ def sync_progress(db: Session, scope: str, plan: StudyPlan | None, before: set[s
         row.ticked_json = json.dumps(ticked)
     db.flush()
 
+
+# ------------------------------------------------------------------ where to start, what to skip
+
+def apply_start_and_skip(db: Session, course_id: int | None, reply: str) -> dict:
+    """Apply the tutor's answer about where the learner starts and what they skip (see the master prompt)."""
+    scope = scope_key(course_id)
+    plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope)).scalar_one_or_none()
+    _, study = _study(db, plan)
+    if not study:
+        raise NoTopics(scope)
+    data = _json_in(reply, _is_start_and_skip,
+                    "LearnOS could not find your tutor's answer in that reply. Ask it for the JSON block with where to start and what to skip.")
+    if str(data.get("plan") or "").strip() != plan_code(study):
+        raise ArrangementError("That answer was made for an earlier version of your study plan. Copy the plan for your tutor again and ask once more.")
+    ids = {f"T{number}": node for number, node in enumerate(study, 1)}
+    ignored, skipped = [], []
+    start = ids.get(str(data.get("start") or "").strip().upper())
+    if start is None and _real(data.get("start")):
+        ignored.append(_line(data.get("start"), 20))
+    for alias in data.get("skip") if isinstance(data.get("skip"), list) else []:
+        node = ids.get(str(alias).strip().upper())
+        if node is None or node is start:  # starting with a topic outranks skipping it
+            if _real(alias) and node is None:
+                ignored.append(_line(alias, 20))
+            continue
+        set_skipped(db, scope, node.node_id, node.title, True)
+        skipped.append(node.title)
+    if start is not None:
+        set_skipped(db, scope, start.node_id, start.title, False)
+        session = next((s for s in sessions(db, plan) if start.node_id in s.topics), None)
+        if session is not None and session.together:
+            set_skipped(db, scope, session.id, session.title, False)
+            start_at(db, scope, session.id, session.title)
+        else:
+            start_at(db, scope, start.node_id, start.title)
+    if start is None and not skipped:
+        raise ArrangementError("That answer does not name any of your topics. Ask your tutor to use the ids from the plan (T1, T2, ...).")
+    return {"start": start.title if start is not None else None, "skipped": skipped, "ignored": ignored}

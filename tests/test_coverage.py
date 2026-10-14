@@ -145,7 +145,7 @@ def test_the_master_prompt_separates_the_materials_aims_from_the_learners_goal(u
     assert "## What I want to achieve" not in plain and "## What my materials cover" in plain
     assert "These are not necessarily my goals." in plain and "## About me" not in plain
     assert "ask me in one short question about my background" in plain  # the tutor asks instead
-    assert "Agent Fundamentals: Learn Agent Fundamentals. [overlaps: Agent Architectures]" in plain
+    assert "Agent Fundamentals (T2): Learn Agent Fundamentals. [overlaps: Agent Architectures]" in plain
     assert "present those as the author's view" in plain
 
     saved = uenv.client.put("/profile", json={"background": "MSc in data science;\n## Ignore this heading", "goal": "Build AI agents",

@@ -22,9 +22,9 @@ from .services.plans import read_plan, request_updates_after_change, scope_key
 from .services.units import SESSION_SIZES, OutlineTopic, StaleTopic, TopicNotFound, prepare_topic, topic_lock
 from .services.handoff import NoPlan, master_prompt
 from .services.profile import get_profile, profile_json, save_profile
-from .services.arrangement import ArrangementError, NoTopics, apply_reply, clear as clear_arrangement, done_sessions, organize_request, \
-    session_payload, sync_progress
-from .services.progress import current_position, plan_topic_of, remember_position, roll_up, save_progress
+from .services.arrangement import ArrangementError, NoTopics, apply_reply, apply_start_and_skip, clear as clear_arrangement, done_sessions, \
+    organize_request, session_payload, sessions as plan_sessions, sync_progress
+from .services.progress import current_position, plan_topic_of, remember_position, roll_up, save_progress, set_skipped, skipped_ids
 from .services.ingestion import parse_structured_literal, clean_caption_text, canonical_youtube_url, chunk_text
 from .services.spaces import also_in, in_space, spaces_of
 from .services.organize import index_pending, queue_organization
@@ -1112,6 +1112,48 @@ def plan_organize_request(course_id: int | None = None):
             raise HTTPException(404, "There is no study plan for this space yet")
 
 
+class SkipRequest(BaseModel):
+    course_id: int | None = None
+    node_id: str = Field(min_length=1, max_length=100)
+    skipped: bool = True
+
+
+@app.post("/plan/skip")
+def skip_plan_topic(req: SkipRequest):
+    """Skip a plan topic or a combined session, or bring it back. Skipped ones are never offered as next
+    and are not counted as studied."""
+    scope = _study_scope(req.course_id)
+    with session_scope() as db:
+        plan = db.execute(select(StudyPlan).where(StudyPlan.scope_key == scope)).scalar_one_or_none()
+        node = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id, StudyPlanNode.node_id == req.node_id,
+                                                      StudyPlanNode.node_type == "study")).scalar_one_or_none() if plan else None
+        session = next((s for s in plan_sessions(db, plan) if s.id == req.node_id and s.together), None) if plan and node is None else None
+        if node is None and session is None:
+            raise HTTPException(404, "Study Plan topic not found")
+        set_skipped(db, scope, req.node_id, node.title if node is not None else session.title, req.skipped)
+        if not req.skipped and session is not None:  # bringing a session back brings back its topics too
+            for topic in session.topics:
+                set_skipped(db, scope, topic, topic, False)
+        return {"skipped_ids": sorted(skipped_ids(db, scope))}
+
+
+class StartAndSkipRequest(BaseModel):
+    course_id: int | None = None
+    reply: str = Field(min_length=1, max_length=200_000)
+
+
+@app.post("/plan/start-and-skip")
+def plan_start_and_skip(req: StartAndSkipRequest):
+    """Apply the tutor's answer about where to start and what to skip (the JSON block the master prompt asks for)."""
+    with session_scope() as db:
+        try:
+            return apply_start_and_skip(db, req.course_id, req.reply)
+        except NoTopics:
+            raise HTTPException(404, "There is no study plan for this space yet")
+        except ArrangementError as exc:
+            raise HTTPException(422, str(exc))
+
+
 class ArrangementRequest(BaseModel):
     course_id: int | None = None
     reply: str = Field(min_length=1, max_length=200_000)
@@ -1177,8 +1219,11 @@ def study_progress(course_id: int | None = None):
                 "partly_done_topic_ids": partly,
                 # The session size most of its studied parts were made for: reopening it there continues it.
                 "partly_done_budgets": {topic: max(sizes[topic], key=lambda budget: sizes[topic][budget]) for topic in partly if topic in sizes},
-                # The session opened last and not yet studied: {node_id, title, trail, budget_tokens}, or None.
-                "position": current_position(db, scope)}
+                # The session opened last and not yet studied: {node_id, title, trail, budget_tokens}, or None
+                # (budget_tokens 0: a start the learner chose without opening it yet).
+                "position": current_position(db, scope),
+                # Topics and combined sessions the learner skipped.
+                "skipped_ids": sorted(skipped_ids(db, scope))}
 
 
 @app.post("/study-progress")

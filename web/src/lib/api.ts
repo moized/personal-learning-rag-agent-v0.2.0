@@ -18,7 +18,7 @@ export type PlanSession={id:string;topics:string[];title:string;why:string;optio
 export type Arranged={sessions:number;together:number;optional:number;left_out:string[];ignored:string[]}
 export type StudyPosition={node_id:string;title:string;trail:string[];budget_tokens:number}
 export type Profile={background:string;goal:string;practice:"questions"|"coding"|"both"}
-export type MasterPrompt={text:string;about_me?:boolean;estimated_tokens:number;characters:number;detailed:boolean;topics:number;completed:number;started:boolean;next_topic:{id:string;title:string;partly_done:boolean}|null;done_words:string;paths:{id:string;title:string}[];path_id:string|null}
+export type MasterPrompt={text:string;about_me?:boolean;skipped?:number;code?:string;estimated_tokens:number;characters:number;detailed:boolean;topics:number;completed:number;started:boolean;next_topic:{id:string;title:string;partly_done:boolean}|null;done_words:string;paths:{id:string;title:string}[];path_id:string|null}
 export type MasteryStatus="unseen"|"learning"|"due"|"mastered"
 export type ConceptMastery={concept_id:number;concept:string;mastery:number;confidence:number;attempts:number;status:MasteryStatus;next_due_at:string|null}
 export type DueReview={concept_id:number;concept:string;mastery:number;due_at:string;overdue_days:number}
@@ -51,7 +51,7 @@ export const api={
  pasteSourceText:(sourceId:number,text:string,format:PasteFormat)=>req<{source_id:number;job_id:number}>(`/sources/${sourceId}/text`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text,input_format:format})}),
  reprocessSource:(sourceId:number)=>req<{source_id:number;job_id:number;documents_retried:number}>(`/sources/${sourceId}/reprocess`,{method:"POST"}),
  removeSource:(sourceId:number,failedAttemptsOnly=false)=>req<{removed:boolean;source_id:number;removed_count:number}>(`/sources/${sourceId}${failedAttemptsOnly?"?failed_attempts_only=true":""}`,{method:"DELETE"}),
- studyProgress:(courseId?:number)=>req<{completed_topics:string[];completed_topic_ids?:string[];completed_legacy_topics?:string[];partly_done_topic_ids?:string[];partly_done_budgets?:Record<string,number>;position?:StudyPosition|null}>("/study-progress"+(courseId?"?course_id="+courseId:"")),
+ studyProgress:(courseId?:number)=>req<{completed_topics:string[];completed_topic_ids?:string[];completed_legacy_topics?:string[];partly_done_topic_ids?:string[];partly_done_budgets?:Record<string,number>;position?:StudyPosition|null;skipped_ids?:string[]}>("/study-progress"+(courseId?"?course_id="+courseId:"")),
  updateStudyProgress:(topic:string,courseId:number|undefined,completed:boolean,topicId?:string)=>req<any>("/study-progress",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic,topic_id:topicId||null,course_id:courseId||null,completed})}),
  jobs:()=>req<Job[]>("/jobs"),
  organizeExisting:(includeUnassigned=true)=>req<Pick<MaintenanceJob,"id"|"status"|"progress_current"|"progress_total"|"checkpoint">&{deduplicated:boolean}>("/maintenance/organize-existing?include_unassigned="+includeUnassigned,{method:"POST"}),
@@ -92,6 +92,8 @@ export const api={
  organizeRequest:(courseId:number|undefined)=>req<{text:string;topics:number;code:string}>("/plan/organize-request"+(courseId?"?course_id="+courseId:"")),
  applyArrangement:(courseId:number|undefined,reply:string)=>req<Arranged>("/plan/arrangement",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({course_id:courseId||null,reply})}),
  clearArrangement:(courseId:number|undefined)=>req<{deleted:boolean}>("/plan/arrangement"+(courseId?"?course_id="+courseId:""),{method:"DELETE"}),
+ skipTopic:(nodeId:string,courseId:number|undefined,skipped=true)=>req<{skipped_ids:string[]}>("/plan/skip",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({node_id:nodeId,course_id:courseId||null,skipped})}),
+ startAndSkip:(courseId:number|undefined,reply:string)=>req<{start:string|null;skipped:string[];ignored:string[]}>("/plan/start-and-skip",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({course_id:courseId||null,reply})}),
  profile:()=>req<Profile>("/profile"),
  saveProfile:(data:Profile)=>req<Profile>("/profile",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)}),
  masterPrompt:(courseId:number|undefined,tutor:string,pathId?:string)=>req<MasterPrompt>("/plan/master-prompt?"+new URLSearchParams({...(courseId?{course_id:String(courseId)}:{}),tutor,...(pathId?{path_id:pathId}:{})}).toString()),

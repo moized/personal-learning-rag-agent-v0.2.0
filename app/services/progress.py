@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import PlanArrangement, StudyPlan, StudyPlanNode, StudyPosition, StudyProgress, TopicDetail
+from ..models import PlanArrangement, StudyPlan, StudyPlanNode, StudyPosition, StudyProgress, StudySkip, TopicDetail
 
 
 def topic_key(title: str) -> str:
@@ -178,4 +178,33 @@ def current_position(db: Session, scope: str) -> dict | None:
     if db.execute(select(StudyProgress.id).where(StudyProgress.scope_key == scope, StudyProgress.completed.is_(True),
                                                  StudyProgress.node_id == row.node_id)).first():
         return None  # studied: what comes next follows from progress
+    from .arrangement import is_skipped  # it reads progress through this module
+    if is_skipped(db, scope, trail[0]):
+        return None  # skipped since: what comes next skips it too
     return {"node_id": row.node_id, "title": row.title, "trail": trail, "budget_tokens": row.budget_tokens}
+
+
+def skipped_ids(db: Session, scope: str) -> set[str]:
+    """Topic and session ids the learner skipped in this scope."""
+    return set(db.execute(select(StudySkip.node_id).where(StudySkip.scope_key == scope)).scalars().all())
+
+
+def set_skipped(db: Session, scope: str, node_id: str, title: str, skipped: bool) -> None:
+    row = db.execute(select(StudySkip).where(StudySkip.scope_key == scope, StudySkip.node_id == node_id)).scalar_one_or_none()
+    if skipped and row is None:
+        db.add(StudySkip(scope_key=scope, node_id=node_id, title=title[:500]))
+    elif not skipped and row is not None:
+        db.delete(row)
+    db.flush()
+
+
+def start_at(db: Session, scope: str, node_id: str, title: str) -> None:
+    """The learner (or their tutor) chose where to start: the plan continues there. Nothing is opened
+    yet, which a size of 0 records, so the session is not called started."""
+    row = db.execute(select(StudyPosition).where(StudyPosition.scope_key == scope)).scalar_one_or_none()
+    if row is None:
+        row = StudyPosition(scope_key=scope)
+        db.add(row)
+    row.node_id, row.trail_json, row.budget_tokens, row.title = node_id, json.dumps([node_id]), 0, title[:500]
+    row.updated_at = datetime.now(UTC)
+    db.flush()

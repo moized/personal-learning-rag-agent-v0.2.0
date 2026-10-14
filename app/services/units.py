@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Chunk, Concept, Course, Document, Evidence, Section, Source, StudyPlan, StudyPlanNode, TopicDetail
 from ..providers.base import AIProvider
-from .arrangement import GROUP_PREFIX, StudySession, done_sessions, is_arranged, sessions as plan_sessions, sync_progress
+from .arrangement import GROUP_PREFIX, StudySession, done_sessions, is_arranged, sessions as plan_sessions, skipped_topics, sync_progress
 from .coverage import Coverage, narrowed, plan_coverage, shown
 from .plans import reading_order, scope_key
 from .profile import about_me_block, get_profile, practice_instruction
@@ -45,10 +45,13 @@ TUTOR_PLACEHOLDER = "{{TUTOR}}"
 # Replaced when a unit is shown: the earlier units it overlaps and what the learner said about themselves.
 # Both change while the unit's material does not, so they are not kept in the prepared unit.
 CONTEXT_PLACEHOLDER = "{{CONTEXT}}"
-PRACTICE_PLACEHOLDER = "{{PRACTICE}}"  # how the learner likes to practise, also chosen in "About me"
+PRACTICE_PLACEHOLDER = "{{PRACTICE}}"
+# What comes next depends on the learner's skips and arrangement, not on the material: filled when shown,
+# so skipping a topic or arranging the plan never makes prepared units or their parts stale.
+NEXT_PLACEHOLDER = "{{NEXT}}"  # how the learner likes to practise, also chosen in "About me"
 EXCERPTS_HEADING = "\n\n## Source excerpts\n"  # placeholders are only filled before it, never in the learner's material
 DONE_WORDS = "unit done"  # what the learner writes to end a unit; unusual enough not to come up by accident
-PACK_FORMAT = 3           # bumped when the pack text changes, so cached units are made again
+PACK_FORMAT = 4           # bumped when the pack text changes, so cached units are made again
 
 
 class TopicNotFound(LookupError):
@@ -105,8 +108,9 @@ class Topic:
     chain: list[str]
     objective: str
     prerequisites: str
-    # What to study after this one, in the same learning path: {"id", "title", "depth"}; depth 0 is a
-    # plan topic, more is a part. None at the end of the path.
+    # What to study after this one: {"id", "title", "depth"}; depth 0 is a plan topic or session, more is
+    # a part. In the same learning path, or the next session of an arranged plan; skipped ones are passed
+    # over. None at the end. Not part of the version (see NEXT_PLACEHOLDER).
     next: dict | None
     # What the prepared result depends on: the plan's content and this topic's place in it.
     # Parts share their plan topic's version; a cached row is valid while its version matches.
@@ -122,17 +126,17 @@ class Topic:
     together_sources: int = 0
 
 
-def _following(arranged: list[StudySession], node_id: str) -> dict | None:
-    """In an arranged plan, what comes after the session that is or holds `node_id`."""
+def _following(arranged: list[StudySession], node_id: str, skipped: set[str] = frozenset()) -> dict | None:
+    """In an arranged plan, the next session not skipped after the session that is or holds `node_id`."""
     for index, session in enumerate(arranged):
         if session.id == node_id or node_id in session.topics:
-            following = arranged[index + 1] if index + 1 < len(arranged) else None
+            following = next((s for s in arranged[index + 1:] if not all(t in skipped for t in s.topics)), None)
             return {"id": following.id, "title": following.title, "depth": 0} if following is not None else None
     return None
 
 
 def _plan_topic(nodes: dict[str, StudyPlanNode], order: list[str], node: StudyPlanNode, scope: str, plan: StudyPlan,
-                coverage: Coverage, arranged: list[StudySession] | None = None) -> Topic:
+                coverage: Coverage, arranged: list[StudySession] | None = None, skipped: set[str] = frozenset()) -> Topic:
     meta = json.loads(node.metadata_json or "{}")
     chain: list[str] = []
     parent = nodes.get(node.parent_node_id) if node.parent_node_id else None
@@ -147,29 +151,30 @@ def _plan_topic(nodes: dict[str, StudyPlanNode], order: list[str], node: StudyPl
         objective = f"{objective}: {goal}" if objective else goal
     study = [node_id for node_id in order if nodes[node_id].node_type == "study" and nodes[node_id].path_id == node.path_id]
     position = study.index(node.node_id) if node.node_id in study else -1
-    following = nodes[study[position + 1]] if 0 <= position < len(study) - 1 else None
+    following = next((nodes[t] for t in study[position + 1:] if t not in skipped), None) if position >= 0 else None
     next_item = {"id": following.node_id, "title": following.title, "depth": 0} if following is not None else None
     if arranged is not None:  # the learner's arrangement decides what comes next
-        next_item = _following(arranged, node.node_id)
-    next_title = next_item["title"] if next_item else None
+        next_item = _following(arranged, node.node_id, skipped)
     purpose = str(meta.get("purpose") or "")
     prerequisites = str(meta.get("prerequisites") or "")
     section_ids = [s for s in meta.get("section_ids") or [] if isinstance(s, int)]
     chunk_ids = coverage.passages.get(node.node_id)
     version = _digest([PACK_FORMAT, plan.revision, node.node_id, node.title, purpose, prerequisites, section_ids, chunk_ids, chain,
-                       objective, next_title])
+                       objective])
     return Topic(scope=scope, plan=plan, node_id=node.node_id, title=node.title, purpose=purpose, depth=0, section_ids=section_ids,
                  chunk_ids=chunk_ids, chain=chain, objective=objective, prerequisites=prerequisites, next=next_item, version=version,
                  overlaps=coverage.overlaps.get(node.node_id, []), new_ideas=coverage.new_ideas.get(node.node_id, []))
 
 
 def _session_topic(db: Session, nodes: dict[str, StudyPlanNode], session: StudySession, scope: str, plan: StudyPlan,
-                   coverage: Coverage, arranged: list[StudySession]) -> Topic:
-    """Topics studied together: one session with all their passages, topic after topic."""
+                   coverage: Coverage, arranged: list[StudySession], skipped: set[str] = frozenset()) -> Topic:
+    """Topics studied together: one session with all their passages, topic after topic. A topic of it the
+    learner skipped is left out, unless they skipped them all and open the session anyway."""
+    members = [topic_id for topic_id in session.topics if topic_id not in skipped] or list(session.topics)
     section_ids: list[int] = []
     chunk_ids: list[int] = []
     together: list[str] = []
-    for topic_id in session.topics:
+    for topic_id in members:
         member = nodes[topic_id]
         sections = [s for s in json.loads(member.metadata_json or "{}").get("section_ids") or [] if isinstance(s, int)]
         section_ids += [s for s in sections if s not in section_ids]
@@ -182,21 +187,20 @@ def _session_topic(db: Session, nodes: dict[str, StudyPlanNode], session: StudyS
         names = coverage.sources.get(topic_id, [])
         together.append(f"{member.title} (from {', '.join(names)})" if names else member.title)
     merged: dict[str, dict] = {}  # earlier topics outside this session that its topics overlap
-    for topic_id in session.topics:
+    for topic_id in members:
         for item in coverage.overlaps.get(topic_id, []):
             if item["id"] in session.topics:
                 continue
             entry = merged.setdefault(item["id"], {**item, "shared": []})
             entry["shared"] += [idea for idea in item["shared"] if idea not in entry["shared"]]
     met = {idea for item in merged.values() for idea in item["shared"]}  # met before, in topics outside the session
-    new_ideas = list(dict.fromkeys(idea for topic_id in session.topics for idea in coverage.ideas.get(topic_id, []) if idea not in met))
-    next_item = _following(arranged, session.id)
-    version = _digest([PACK_FORMAT, plan.revision, session.id, session.title, session.why, section_ids, chunk_ids, together,
-                       next_item["title"] if next_item else None])
+    new_ideas = list(dict.fromkeys(idea for topic_id in members for idea in coverage.ideas.get(topic_id, []) if idea not in met))
+    next_item = _following(arranged, session.id, skipped)
+    version = _digest([PACK_FORMAT, plan.revision, session.id, session.title, session.why, section_ids, chunk_ids, together])
     return Topic(scope=scope, plan=plan, node_id=session.id, title=session.title, purpose=session.why, depth=0, section_ids=section_ids,
                  chunk_ids=chunk_ids, chain=[], objective="", prerequisites="", next=next_item, version=version,
                  overlaps=sorted(merged.values(), key=lambda item: -len(item["shared"])), new_ideas=new_ideas, together=together,
-                 together_sources=len({name for topic_id in session.topics for name in coverage.sources.get(topic_id, [])}))
+                 together_sources=len({name for topic_id in members for name in coverage.sources.get(topic_id, [])}))
 
 
 def _detail(db: Session, scope: str, node_id: str, budget: int) -> TopicDetail | None:
@@ -220,15 +224,16 @@ def find_topic(db: Session, course_id: int | None, node_id: str, budget: int) ->
     rows = db.execute(select(StudyPlanNode).where(StudyPlanNode.plan_id == plan.id).order_by(StudyPlanNode.id)).scalars().all()
     nodes = {row.node_id: row for row in rows}
     arranged = plan_sessions(db, plan) if is_arranged(db, scope) else None
+    skipped = skipped_topics(db, scope, plan)
     if node_id in nodes:
         if nodes[node_id].node_type != "study":
             raise OutlineTopic(node_id)
         return _plan_topic(nodes, [row.node_id for row in reading_order(rows)], nodes[node_id], scope, plan, plan_coverage(db, plan),
-                           arranged)
+                           arranged, skipped)
     if node_id.startswith(GROUP_PREFIX) and arranged is not None:
         session = next((s for s in arranged if s.id == node_id and s.together), None)
         if session is not None:
-            return _session_topic(db, nodes, session, scope, plan, plan_coverage(db, plan), arranged)
+            return _session_topic(db, nodes, session, scope, plan, plan_coverage(db, plan), arranged, skipped)
     detail = _detail(db, scope, node_id, budget)
     if detail is None or not detail.parent_node_id:
         raise TopicNotFound(node_id)
@@ -553,8 +558,7 @@ def _pack(db: Session, topic: Topic, primary: list[Chunk], related: list[tuple[C
             f"- Learning objective: {topic.objective}" if topic.objective else "",
             f"- This unit: {' > '.join(topic.chain + [topic.title])}",
             f"- Studies together: {'; '.join(topic.together)}" if topic.together else "",
-            f"- Before this: {topic.prerequisites}" if topic.prerequisites.strip().casefold() not in {"", "none", "none recorded"} else "",
-            f"- Comes next: {topic.next['title']}" if topic.next else ""]
+            f"- Before this: {topic.prerequisites}" if topic.prerequisites.strip().casefold() not in {"", "none", "none recorded"} else ""]
     instructions = (f"You are my patient, rigorous study tutor. This session covers one unit of my study plan: {topic.title}."
                     + (f" Its purpose: {topic.purpose}" if topic.purpose else "")
                     + ((" It combines topics from several of my sources that teach related ideas: teach the combined picture, and point"
@@ -569,7 +573,7 @@ def _pack(db: Session, topic: Topic, primary: list[Chunk], related: list[tuple[C
                     + f'\nWhen I write "{DONE_WORDS}", give me a recap of this unit in at most five bullet points and three review questions'
                       " (without the answers) to keep for later."
                     + f"\nThis prompt is prepared for {TUTOR_PLACEHOLDER}; keep the response interactive and easy to read.")
-    text = f"# Study unit: {topic.title}\n\n## Where this fits\n" + "\n".join(line for line in fits if line)
+    text = f"# Study unit: {topic.title}\n\n## Where this fits\n" + "\n".join(line for line in fits if line) + NEXT_PLACEHOLDER
     text += f"\n\n{CONTEXT_PLACEHOLDER}## Tutor instructions (paste this with the excerpts)\n{instructions}{EXCERPTS_HEADING}" + "\n\n".join(b for _, b in kept)
     if extra:
         text += "\n\n## Related material from elsewhere in this space\n" + "\n\n".join(b for _, b in extra)
@@ -708,7 +712,9 @@ def _response(db: Session, topic: Topic, row: TopicDetail, payload: dict, tutor:
         head, heading, excerpts = out["study_text"].partition(EXCERPTS_HEADING)
         head = _fill(head, TUTOR_PLACEHOLDER, TUTOR_NAMES.get(tutor, "any AI tutor"))
         head = _fill(head, PRACTICE_PLACEHOLDER, practice_instruction(profile))
-        head = _fill(head, CONTEXT_PLACEHOLDER + "## Tutor instructions", _context(profile, out["overlaps"], out["new_ideas"]) + "## Tutor instructions")
+        following = f"\n- Comes next: {_one_line(topic.next['title'])}" if topic.next else ""
+        head = _fill(head, NEXT_PLACEHOLDER + "\n\n" + CONTEXT_PLACEHOLDER + "## Tutor instructions",
+                     following + "\n\n" + _context(profile, out["overlaps"], out["new_ideas"]) + "## Tutor instructions")
         out["study_text"] = head + heading + excerpts
         out["estimated_tokens"] = estimate_tokens(out["study_text"])
     if row.status == "split":

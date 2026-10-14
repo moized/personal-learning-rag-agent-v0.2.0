@@ -410,3 +410,15 @@ class PlanArrangement(Base):
     applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class StudySkip(Base):
+    """A plan topic or a combined session the learner chose to skip: never offered as next and not
+    counted as studied, until they bring it back (see services.arrangement.skipped_topics)."""
+    __tablename__ = "study_skips"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope_key: Mapped[str] = mapped_column(String(80), index=True)
+    node_id: Mapped[str] = mapped_column(String(100))
+    title: Mapped[str] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (UniqueConstraint("scope_key", "node_id", name="uq_study_skip"),)

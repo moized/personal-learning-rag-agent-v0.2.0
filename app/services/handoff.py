@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Course, StudyPlan, StudyPlanNode, StudyProgress
-from .arrangement import is_arranged, sessions as arranged_sessions
+from .arrangement import aliases, is_arranged, plan_code, sessions as arranged_sessions, skipped_topics
 from .coverage import plan_coverage, shown
 from .plans import reading_order, scope_key
 from .profile import about_me_lines, get_profile, missing, practice_instruction
@@ -52,6 +52,9 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
         raise NoPlan(scope)
     ordered = reading_order(rows)
     coverage = plan_coverage(db, plan)
+    every_topic = [node for node in ordered if node.node_type == "study"]  # the ids T1, T2, ... number the whole plan
+    alias, code = aliases(every_topic), plan_code(every_topic)
+    skipped = skipped_topics(db, scope, plan)
     paths = all_paths = [node for node in ordered if node.node_id == node.path_id]
     if path_id is not None:
         if not any(node.node_id == path_id for node in paths):
@@ -68,9 +71,13 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
     def done(node: StudyPlanNode) -> bool:
         return node.node_id in done_ids or topic_key(node.title) in done_titles
 
+    def open_(node: StudyPlanNode) -> bool:  # still to study: neither studied nor skipped
+        return not done(node) and node.node_id not in skipped
+
     study = [node for node in ordered if node.node_type == "study"]
     by_id = {node.node_id: node for node in study}
-    finished = [node for node in study if done(node)]
+    counted = [node for node in study if done(node) or node.node_id not in skipped]  # skipped topics are not counted
+    finished = [node for node in counted if done(node)]
     started = {roots[node_id] for node_id in done_ids if node_id in roots}  # topics with studied parts
     # Where the learner is: after the topic they worked on last, in its own path.
     recent = None
@@ -83,14 +90,17 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
     if recent is not None:
         same_path = [node for node in study if node.path_id == recent.path_id]
         after = same_path[same_path.index(recent):]
-        upcoming = next((node for node in after if not done(node)), None) or next((node for node in same_path if not done(node)), None)
-    upcoming = upcoming or next((node for node in study if not done(node)), None)
-    # A session opened and not finished is where the learner is, even with nothing ticked yet.
+        upcoming = next((node for node in after if open_(node)), None) or next((node for node in same_path if open_(node)), None)
+    upcoming = upcoming or next((node for node in study if open_(node)), None)
+    # A session opened and not finished is where the learner is, even with nothing ticked yet; a start
+    # the learner chose without opening it yet (size 0) is where they continue, but not "started".
     position = current_position(db, scope)
+    opened = bool(position and position["budget_tokens"])
     resume = by_id.get(position["trail"][0]) if position else None
-    if resume is not None and not done(resume):
+    if resume is not None and open_(resume):
         upcoming = resume
-        started.add(resume.node_id)
+        if opened:
+            started.add(resume.node_id)
     # A plan the learner had their AI arrange (see arrangement) is studied session by session.
     arranged = arranged_sessions(db, plan) if path_id is None and is_arranged(db, scope) else []
     in_group = {topic: session for session in arranged if session.together for topic in session.topics}
@@ -99,12 +109,15 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
     def session_done(session) -> bool:
         return all(done(by_id[topic]) for topic in session.topics if topic in by_id)
 
+    def session_closed(session) -> bool:  # nothing left to study in it: studied or skipped
+        return not any(open_(by_id[topic]) for topic in session.topics if topic in by_id)
+
     if arranged:
         at = position["trail"][0] if position else None
-        current = next((s for s in arranged if at and (s.id == at or at in s.topics) and not session_done(s)), None)
-        if current is not None:
+        current = next((s for s in arranged if at and (s.id == at or at in s.topics) and not session_closed(s)), None)
+        if current is not None and opened:
             started.add(current.id)
-        current = current or next((s for s in arranged if not session_done(s)), None)
+        current = current or next((s for s in arranged if not session_closed(s)), None)
         upcoming = None if current is None else SimpleNamespace(
             node_id=current.id, title=current.title, path_id=None if current.together else by_id[current.topics[0]].path_id)
 
@@ -135,7 +148,7 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
             numbers[node.node_id] = number
             indent = "  " * number.count(".")
             purpose = _flat(_meta(node).get("purpose"))
-            line = f"{indent}{number}. {_flat(node.title)}"
+            line = f"{indent}{number}. {_flat(node.title)}" + (f" ({alias[node.node_id]})" if node.node_id in alias else "")
             if node.node_type == "outline":
                 line += " (a group of the topics below)"
             elif detailed and purpose:
@@ -148,6 +161,8 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
                 line += " [optional]"
             if node.node_type == "study" and done(node):
                 line += " [done]"
+            elif node.node_id in skipped:
+                line += " [skipped]"
             elif node.node_id in started:
                 line += " [partly done]"
             lines.append(line)
@@ -162,18 +177,23 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
     if upcoming is not None and len(paths) > 1:
         path_title = next((p.title for p in paths if p.node_id == upcoming.path_id), "")
         in_path = f" (in {_flat(path_title)})" if path_title else ""
-    if upcoming is None and study:
-        where = f"I have studied all {len(study)} topics of this plan. Help me review: ask me questions across the whole plan."
+    left_out = len(study) - len(counted)
+    skipped_note = f" I chose to skip {left_out} {'topic' if left_out == 1 else 'topics'}." if left_out else ""
+    chosen = bool(position and not opened and upcoming is not None and position["trail"][0] == upcoming.node_id)
+    if upcoming is None and counted:
+        where = (f"I have studied all {len(counted)} topics of this plan.{skipped_note} Help me review: ask me questions across the"
+                 " whole plan.")
         ready = "tell me you are ready to help me review"
     elif upcoming is None:
-        where, ready = "The plan has no topics yet.", "tell me you are ready"
+        where, ready = ("The plan has no topics yet." if not study else f"I chose to skip every topic of this plan."), "tell me you are ready"
     elif not finished and not started:
-        where = f"I have not started yet. The first topic is: {_flat(upcoming.title)}{in_path}."
+        first = "I want to start with" if chosen else "The first topic is"
+        where = f"I have not started yet. {first}: {_flat(upcoming.title)}{in_path}.{skipped_note}"
         ready = "tell me you are ready for the first unit"
     else:
         current = (f"I am partway through: {_flat(upcoming.title)}{in_path}." if upcoming.node_id in started
                    else f"Next up: {_flat(upcoming.title)}{in_path}.")
-        where = f"I have studied {len(finished)} of {len(study)} topics. {current}"
+        where = f"I have studied {len(finished)} of {len(counted)} topics.{skipped_note} {current}"
         ready = "tell me you are ready for the next unit"
     as_of = datetime.now(UTC).date().isoformat()
     profile = get_profile(db)
@@ -195,6 +215,11 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
         rules.append('I study the plan in the sessions listed under "My study sessions". A session that combines topics comes as one'
                      " unit with all their excerpts: teach them as one connected picture, and compare the sources when it draws on more"
                      " than one.")
+    if skipped:
+        rules.append("Topics marked [skipped] are ones I chose to skip: do not teach them unless I ask.")
+    rules.append(f"When I want to change where I start or what I skip, give me this JSON block to paste into LearnOS, using the topic"
+                 f' ids in brackets: {{"plan": "{code}", "start": "T?", "skip": ["T?"]}} (leave "start" empty or "skip" as [] when it'
+                 " does not change).")
     rules += [
         "Stay within the unit. If I am missing something from earlier in the plan, explain it briefly and come back.",
         f'When I write "{DONE_WORDS}", give me a recap of the unit in at most five bullet points and three review questions'
@@ -208,13 +233,22 @@ def master_prompt(db: Session, course_id: int | None, tutor: str = "general", pa
     ask = missing(profile)  # what the tutor asks about, when the learner has not said it under About me
     opener = (f"reply with a two-sentence summary of it, ask me in one short question about {' and '.join(ask)}, and {ready}" if ask
               else f"reply with a two-sentence summary of it and {ready}")
+    if not finished and not started and upcoming is not None:
+        # Before the first unit, the tutor helps the learner choose where to start and what to skip.
+        basis = "my background and goal" if not ask else "what I tell you about myself"
+        opener = ("reply with a two-sentence summary of it" + (f", ask me in one short question about {' and '.join(ask)}" if ask else "")
+                  + f", then suggest where I should start and which topics I could skip, given {basis}, and ask me to confirm or change"
+                  " it. When I confirm, give me the JSON block described above, then tell me you are ready for the first unit")
 
     session_lines = []
     for number, session in enumerate(arranged, 1):
         line = f"{number}. {_flat(session.title)}"
         if session.together:
-            line += ": " + " + ".join(_flat(by_id[topic].title, 120) for topic in session.topics if topic in by_id)
-        line += (" [optional]" if session.optional else "") + (" [done]" if session_done(session) else "")
+            line += ": " + " + ".join(f"{_flat(by_id[topic].title, 120)} ({alias[topic]})" for topic in session.topics if topic in by_id)
+        elif session.topics[0] in alias:
+            line += f" ({alias[session.topics[0]]})"
+        line += (" [optional]" if session.optional else "")
+        line += (" [done]" if session_done(session) else " [skipped]" if session_closed(session) else "")
         session_lines.append(line)
     sessions_section = ("\n\n## My study sessions, in order\n" + "\n".join(session_lines)) if session_lines else ""
 
@@ -243,6 +277,6 @@ If my message contains only this plan, {opener}, without teaching yet. Whenever 
     if not detailed:
         text = compose(detailed=False)
     return {"text": text, "estimated_tokens": estimate_tokens(text), "characters": len(text), "detailed": detailed,
-            "topics": len(study), "completed": len(finished), "started": bool(finished or started),
+            "topics": len(counted), "completed": len(finished), "skipped": left_out, "started": bool(finished or started), "code": code,
             "next_topic": {"id": upcoming.node_id, "title": upcoming.title, "partly_done": upcoming.node_id in started} if upcoming else None,
             "done_words": DONE_WORDS, "about_me": bool(about), "paths": [{"id": path.node_id, "title": path.title} for path in all_paths], "path_id": path_id}
