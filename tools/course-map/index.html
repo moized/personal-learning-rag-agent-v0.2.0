@@ -1,0 +1,910 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>My Course Map</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+body { margin: 0; }
+/* Layout: transcript ledger — course cards grouped by term on the left, a sticky "AI context" output panel on the right; stacks on phones. */
+:root {
+  --bg: #f3f5f7; --surface: #ffffff; --sunk: #eaeef2; --ink: #15202b; --muted: #5a6875; --line: #d8dfe6;
+  --accent: #1d58b8; --accent-ink: #ffffff; --accent-soft: #e3ecfa;
+  --known: #2b8048; --known-soft: #e2f2e7; --unsure: #a86a12; --unsure-soft: #fbefd9;
+  --none: #6b7884; --none-soft: #e9edf1; --reviewed: #157a7a; --reviewed-soft: #dcf1f0;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --r: 8px;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #11171d; --surface: #182129; --sunk: #0d1318; --ink: #e4eaf0; --muted: #94a3b0; --line: #2a3640;
+  --accent: #6c9ef0; --accent-ink: #0b1420; --accent-soft: #1b2b44;
+  --known: #5cc27f; --known-soft: #15301f; --unsure: #e2a64a; --unsure-soft: #36280f;
+  --none: #9aa7b2; --none-soft: #222c35; --reviewed: #4cc2c0; --reviewed-soft: #11302f; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #11171d; --surface: #182129; --sunk: #0d1318; --ink: #e4eaf0; --muted: #94a3b0; --line: #2a3640;
+  --accent: #6c9ef0; --accent-ink: #0b1420; --accent-soft: #1b2b44;
+  --known: #5cc27f; --known-soft: #15301f; --unsure: #e2a64a; --unsure-soft: #36280f;
+  --none: #9aa7b2; --none-soft: #222c35; --reviewed: #4cc2c0; --reviewed-soft: #11302f; color-scheme: dark }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
+.wrap { max-width: 1240px; margin: 0 auto; padding-block: 28px 64px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+h1 { font-size: 2.1rem; font-weight: 700; letter-spacing: -0.01em; }
+.lede { color: var(--muted); max-width: 62ch; margin: 6px 0 0; }
+.mono { font-family: var(--font-mono); }
+button, select, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Summary */
+.summary { display: grid; gap: 14px; margin: 22px 0 18px; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px 22px; font-variant-numeric: tabular-nums; }
+.stat { display: flex; align-items: baseline; gap: 6px; }
+.stat b { font-family: var(--font-display); font-size: 1.35rem; }
+.stat span { color: var(--muted); font-size: 0.86rem; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; align-self: center; }
+.bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--sunk); }
+.bar i { display: block; height: 100%; transition: width .3s; }
+
+/* Toolbar */
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); }
+.toolbar input[type=search] { flex: 1 1 220px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.toolbar select { padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 4px 11px; font-size: 0.84rem; }
+.chip[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.check { display: inline-flex; gap: 6px; align-items: center; font-size: 0.88rem; color: var(--muted); }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 22px; margin-top: 18px; align-items: start; }
+@media (max-width: 920px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+/* Terms and courses */
+.term { margin-bottom: 22px; }
+.term-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; border-bottom: 2px solid var(--ink); padding-bottom: 4px; margin-bottom: 10px; }
+.term-head h2 { font-size: 1.05rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.term-head span { color: var(--muted); font-size: 0.82rem; }
+.course { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); margin-bottom: 8px; }
+.course > summary { list-style: none; display: grid; grid-template-columns: 76px minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 11px 14px; cursor: pointer; }
+.course > summary::-webkit-details-marker { display: none; }
+.code { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); }
+.cname { font-weight: 600; min-width: 0; }
+.cname small { display: block; font-weight: 400; color: var(--muted); font-size: 0.8rem; }
+.meta { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.tag { font-size: 0.74rem; border-radius: 4px; padding: 1px 7px; background: var(--sunk); color: var(--muted); white-space: nowrap; }
+.tag.grade { font-family: var(--font-mono); background: var(--accent-soft); color: var(--accent); }
+.mini { width: 54px; height: 5px; border-radius: 3px; background: var(--sunk); overflow: hidden; display: flex; }
+.mini i { height: 100%; }
+.count { font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 34px; text-align: right; }
+@media (max-width: 560px) { .course > summary { grid-template-columns: minmax(0, 1fr) auto; } .code { grid-column: 1 / -1; } }
+
+.cbody { border-top: 1px solid var(--line); padding: 6px 14px 14px; }
+.note-overlap { font-size: 0.84rem; color: var(--unsure); background: var(--unsure-soft); border-radius: 6px; padding: 6px 10px; margin: 8px 0 4px; }
+.topic { padding: 9px 0; border-bottom: 1px dashed var(--line); }
+.trow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.tname { flex: 1 1 200px; min-width: 0; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; background: var(--surface); padding: 5px 10px; font-size: 0.82rem; color: var(--muted); }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed=true][data-v=known] { background: var(--known-soft); color: var(--known); font-weight: 600; }
+.seg button[aria-pressed=true][data-v=unsure] { background: var(--unsure-soft); color: var(--unsure); font-weight: 600; }
+.seg button[aria-pressed=true][data-v=none] { background: var(--none-soft); color: var(--ink); font-weight: 600; }
+.x { border: 0; background: none; color: var(--muted); font-size: 1.1rem; line-height: 1; padding: 4px 6px; border-radius: 4px; }
+.x:hover { background: var(--sunk); color: var(--ink); }
+.explain { margin-top: 8px; padding: 9px 12px; border-radius: 6px; background: var(--sunk); font-size: 0.9rem; display: grid; gap: 8px; }
+.explain.ok { background: var(--reviewed-soft); }
+.explain label { display: inline-flex; gap: 8px; align-items: center; font-weight: 500; font-size: 0.86rem; }
+.explain.ok label { color: var(--reviewed); }
+.cfoot { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+.cfoot input[type=text], .cfoot select { padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); min-width: 0; }
+.cfoot .grow { flex: 1 1 220px; }
+.btn { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 6px 12px; font-size: 0.86rem; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.btn.warn { color: var(--unsure); }
+.linkbtn { border: 0; background: none; color: var(--accent); padding: 0; font-size: 0.84rem; text-decoration: underline; }
+.lbl { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+
+.removed { margin-top: 26px; background: var(--surface); border: 1px dashed var(--line); border-radius: var(--r); padding: 12px 14px; }
+.removed summary { cursor: pointer; font-weight: 600; }
+.removed ul { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 6px; }
+.removed li { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.empty { color: var(--muted); padding: 30px 0; text-align: center; }
+
+/* Panel */
+.panel { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 16px; display: grid; gap: 12px; max-height: calc(100vh - 24px); overflow: auto; }
+@media (max-width: 920px) { .panel { position: static; max-height: none; } }
+.panel h3 { font-size: 1.2rem; }
+.panel p { margin: 0; color: var(--muted); font-size: 0.88rem; }
+.panel textarea { width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); padding: 10px; resize: vertical; }
+#out { font-family: var(--font-mono); font-size: 0.76rem; line-height: 1.45; min-height: 300px; }
+#about { min-height: 74px; font-size: 0.88rem; }
+.tabs { display: flex; gap: 4px; background: var(--sunk); padding: 3px; border-radius: 7px; }
+.tabs button { flex: 1; border: 0; background: none; padding: 6px; border-radius: 5px; font-size: 0.84rem; color: var(--muted); }
+.tabs button[aria-selected=true] { background: var(--surface); color: var(--ink); font-weight: 600; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.toast { color: var(--known); font-size: 0.84rem; }
+.legend { display: grid; gap: 4px; font-size: 0.84rem; color: var(--muted); }
+.legend b { color: var(--ink); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Course Map</h1>
+    <p class="lede">Go through each course from your transcripts and mark every topic. Topics you are unsure of or never covered open a short explanation. The panel on the right turns your answers into a profile you can paste into any AI chat.</p>
+  </header>
+
+  <section class="summary" aria-label="Progress">
+    <div class="stats" id="stats"></div>
+    <div class="bar" id="bar" aria-hidden="true"></div>
+  </section>
+
+  <div class="toolbar">
+    <input type="search" id="q" placeholder="Search courses or topics…" aria-label="Search courses or topics">
+    <select id="prog" aria-label="Program">
+      <option value="">Both degrees</option>
+      <option value="BSc">BSc · Physics Engineering</option>
+      <option value="MSc">MSc · Data Science</option>
+    </select>
+    <div class="chips" id="areas" role="group" aria-label="Filter by area"></div>
+    <label class="check"><input type="checkbox" id="todo"> Only courses with unmarked topics</label>
+  </div>
+
+  <div class="layout">
+    <main>
+      <div id="courses"></div>
+      <details class="removed" id="removed"></details>
+    </main>
+
+    <aside class="panel" aria-label="AI context">
+      <h3>AI context</h3>
+      <div class="legend">
+        <div><b>Know it</b> · you could explain it to someone else</div>
+        <div><b>Not sure</b> · seen it, but shaky</div>
+        <div><b>Not taken</b> · not covered in your version of the course</div>
+      </div>
+      <label class="lbl" for="about">About me (optional)</label>
+      <textarea id="about" placeholder="Goals, current job or thesis topic, what you want the AI to help with…"></textarea>
+      <div class="tabs" role="tablist">
+        <button role="tab" data-tab="md" aria-selected="true">Profile</button>
+        <button role="tab" data-tab="rag" aria-selected="false">RAG agent JSON</button>
+        <button role="tab" data-tab="backup" aria-selected="false">Backup</button>
+      </div>
+      <p id="tabhelp"></p>
+      <textarea id="out" readonly spellcheck="false" aria-label="Generated output"></textarea>
+      <div class="row">
+        <button class="btn primary" id="copy">Copy</button>
+        <button class="btn" id="dl" hidden>Download</button>
+        <span class="toast" id="toast" role="status"></span>
+      </div>
+      <div id="restoreBox" hidden>
+        <label class="lbl" for="restoreIn">Restore from a backup</label>
+        <textarea id="restoreIn" rows="3" placeholder="Paste a backup here, or choose a file below"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button class="btn" id="restoreBtn">Restore</button>
+          <input type="file" id="restoreFile" accept=".json,application/json" aria-label="Backup file">
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn warn" id="resetBtn">Clear all my answers</button>
+          <button class="btn" id="resetYes" hidden>Yes, clear everything</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+// ---------- Personal data (grades / GPA). Leave empty to omit. ----------
+const GRADES = {}; // e.g. {"FIZ103": "AA"} — kept out of the public repo
+const GPA = {}; // e.g. {"BSc": "3.50"}
+
+const PROGRAMS = {
+  BSc: "BSc Physics Engineering, Istanbul Medeniyet University (2019–2024, taught in Turkish)",
+  MSc: "MSc (with thesis) Data Science and Big Data, Yıldız Technical University (2025–present, course stage)"
+};
+const AREAS = ["Physics", "Mathematics", "Computing", "Data & AI", "Engineering", "Chemistry", "Labs & projects", "General education"];
+
+// Each topic: "Name|Short explanation"
+const C = (id, code, name, term, prog, area, topics, extra = {}) => ({ id, code, name, term, prog, area, topics, ...extra });
+const COURSES = [
+C("FIZ103","FİZ103","Mechanics","2020 Fall","BSc","Physics",[
+ "Vectors and kinematics|Describing motion with position, velocity and acceleration vectors, including projectile and circular motion.",
+ "Newton's laws|Forces change motion (F = ma). Free-body diagrams, friction, tension and normal forces.",
+ "Work and energy|Work transfers energy. Kinetic plus potential energy stays constant when there is no friction.",
+ "Momentum and collisions|Total momentum is conserved in an isolated system. Elastic collisions also conserve kinetic energy.",
+ "Rotational motion|Torque, moment of inertia and angular momentum: the rotational versions of Newton's laws.",
+ "Gravitation and oscillations|Newton's law of gravity and orbits; simple harmonic motion of springs and pendulums."]),
+C("FIZ103L","FİZ103L","Mechanics Laboratory","2020 Fall","BSc","Labs & projects",[
+ "Measurement and units|Using calipers, timers and sensors; SI units and significant figures.",
+ "Error analysis|Estimating the uncertainty of a measurement and carrying it through calculations.",
+ "Graphs and linear fits|Plotting data and reading a slope or intercept to test a physical law.",
+ "Free fall and inclined plane|Measuring g and checking the kinematics equations experimentally.",
+ "Collision and pendulum experiments|Testing momentum conservation and how a pendulum's period depends on its length.",
+ "Lab reports|Writing aim, method, data, analysis and conclusion in a standard format."]),
+C("ENG1","IMU011","English I","2020 Fall","BSc","General education",[
+ "Grammar and vocabulary|Core English grammar and everyday vocabulary.",
+ "Reading and writing|Reading short texts and writing paragraphs."],{gen:true}),
+C("TRK1","IMU031","Turkish Language I","2020 Fall","BSc","General education",[
+ "Turkish grammar and spelling|Rules of written Turkish.",
+ "Composition|Writing structured texts in Turkish."],{gen:true}),
+C("KIM101","KİM101","Chemistry I","2020 Fall","BSc","Chemistry",[
+ "Atomic structure|Protons, neutrons and electrons; orbitals and electron configurations.",
+ "Periodic trends|How atomic radius, ionization energy and electronegativity change across the periodic table.",
+ "Chemical bonding|Ionic, covalent and metallic bonds; Lewis structures and molecular shapes (VSEPR).",
+ "Moles and stoichiometry|Counting particles with moles, balancing equations and finding the limiting reagent.",
+ "Gases|The ideal gas law PV = nRT and the kinetic theory that explains it.",
+ "Thermochemistry|Heat released or absorbed by reactions: enthalpy and Hess's law."]),
+C("KIM101L","KİM101L","Chemistry Laboratory I","2020 Fall","BSc","Labs & projects",[
+ "Lab safety and glassware|Handling chemicals safely; using pipettes, burettes and balances.",
+ "Titration|Finding an unknown concentration by reacting it with a solution of known concentration.",
+ "Preparing solutions|Making a solution of a given molarity and diluting it.",
+ "Separation techniques|Filtration, distillation and crystallization."]),
+C("MAT101","MAT101","Mathematics I","2020 Fall","BSc","Mathematics",[
+ "Functions and graphs|Domain, range, inverse functions, exponentials, logarithms and trigonometric functions.",
+ "Limits and continuity|What value a function approaches near a point, and when a function has no jumps or gaps.",
+ "Derivatives|The instantaneous rate of change; product, quotient and chain rules.",
+ "Applications of derivatives|Finding maxima and minima, sketching curves, related rates and L'Hôpital's rule.",
+ "Integrals|Area under a curve; the Fundamental Theorem of Calculus links integrals and derivatives.",
+ "Integration techniques|Substitution and integration by parts."]),
+C("MDB101","MDB101","Introduction to Engineering","2020 Fall","BSc","Engineering",[
+ "Engineering disciplines|What different engineering fields do and how they overlap.",
+ "Design process|Define the problem, generate ideas, build, test and iterate.",
+ "Estimation and problem solving|Order-of-magnitude estimates and structured approaches to problems.",
+ "Engineering ethics|Professional responsibility, safety and honesty in engineering work."]),
+C("MDB103","MDB103","Basic Information and Communication Technologies","2020 Fall","BSc","Computing",[
+ "Computer basics|Hardware parts, operating systems and file management.",
+ "Office software|Word processing and presentation tools.",
+ "Spreadsheets|Formulas, functions and charts in Excel-like tools.",
+ "Internet and security basics|How networks and email work; passwords and safe browsing."]),
+
+C("FIZ104","FİZ104","Electricity and Magnetism","2021 Spring","BSc","Physics",[
+ "Coulomb's law and electric field|Force between charges and the field a charge creates around it.",
+ "Gauss's law|The electric flux through a closed surface equals the enclosed charge divided by ε₀.",
+ "Electric potential and capacitance|Potential energy per charge; capacitors store charge and energy.",
+ "DC circuits|Current, resistance, Ohm's law and Kirchhoff's rules; RC circuits.",
+ "Magnetic fields and forces|Lorentz force on moving charges; fields from currents (Biot–Savart, Ampère).",
+ "Electromagnetic induction|A changing magnetic flux induces a voltage (Faraday's law, Lenz's law); inductance."]),
+C("FIZ104L","FİZ104L","Electricity and Magnetism Laboratory","2021 Spring","BSc","Labs & projects",[
+ "Circuit measurements|Checking Ohm's law and Kirchhoff's rules with real circuits.",
+ "Multimeter and oscilloscope|Measuring voltage, current and time-varying signals.",
+ "RC charging and discharging|Measuring the exponential time constant τ = RC.",
+ "Magnetic field and induction experiments|Measuring fields around coils and induced voltages."]),
+C("FIZ114","FİZ114","Introduction to Computer Programming","2021 Spring","BSc","Computing",[
+ "Variables and data types|Storing numbers, text and booleans; arithmetic and logical operators.",
+ "Conditionals and loops|if/else decisions and for/while repetition.",
+ "Functions|Reusable blocks of code with inputs and return values.",
+ "Arrays and lists|Storing and looping over collections of values.",
+ "Algorithms and flowcharts|Breaking a problem into clear steps before coding.",
+ "Debugging|Reading error messages and finding mistakes in code."]),
+C("ENG2","IMU012","English II","2021 Spring","BSc","General education",[
+ "Intermediate English|Continued grammar, reading and writing."],{gen:true}),
+C("TRK2","IMU032","Turkish Language II","2021 Spring","BSc","General education",[
+ "Academic Turkish writing|Reports, essays and formal writing in Turkish."],{gen:true}),
+C("KIM102","KİM102","Chemistry II","2021 Spring","BSc","Chemistry",[
+ "Reaction kinetics|How fast reactions go: rate laws and activation energy.",
+ "Chemical equilibrium|The equilibrium constant K and Le Chatelier's principle.",
+ "Acids, bases and buffers|pH, strong and weak acids, and solutions that resist pH change.",
+ "Solubility|Solubility product Ksp and when precipitates form.",
+ "Electrochemistry|Redox reactions, galvanic cells and electrode potentials.",
+ "Entropy and free energy|Gibbs free energy decides whether a reaction happens on its own."]),
+C("KIM102L","KİM102L","Chemistry Laboratory II","2021 Spring","BSc","Labs & projects",[
+ "pH and buffer experiments|Measuring pH and testing buffer capacity.",
+ "Reaction rate measurements|Following concentration over time to find a rate law.",
+ "Electrochemical cells|Building a cell and measuring its voltage.",
+ "Qualitative analysis|Identifying ions from their characteristic reactions."]),
+C("MAT102","MAT102","Mathematics II","2021 Spring","BSc","Mathematics",[
+ "Improper integrals|Integrals over infinite ranges or with singular points.",
+ "Sequences and series|When an infinite sum converges: ratio, root and comparison tests.",
+ "Power and Taylor series|Writing functions as infinite polynomials around a point.",
+ "Partial derivatives|Rates of change of functions of several variables; gradient.",
+ "Multiple integrals|Double and triple integrals for areas, volumes and masses.",
+ "Vector calculus basics|Line integrals, divergence and curl; Green's theorem."]),
+
+C("FIZ203","FİZ203","Modern Physics I","2021 Fall","BSc","Physics",[
+ "Special relativity|Time dilation, length contraction and E = mc² at speeds near light.",
+ "Blackbody radiation and photons|Light comes in energy packets E = hf (Planck).",
+ "Photoelectric and Compton effects|Experiments showing light behaves like particles.",
+ "Wave–particle duality|Matter also behaves like waves, with wavelength λ = h/p (de Broglie).",
+ "Bohr model and spectra|Quantized electron orbits explain hydrogen's spectral lines.",
+ "Uncertainty principle|Position and momentum cannot both be known exactly: Δx·Δp ≥ ħ/2."]),
+C("FIZ205","FİZ205","Materials Science and Engineering","2021 Fall","BSc","Engineering",[
+ "Crystal structures and defects|How atoms pack (FCC, BCC, HCP) and how vacancies and dislocations form.",
+ "Mechanical properties|Stress–strain curves, elasticity, yield strength and hardness.",
+ "Phase diagrams|Which phases are stable at each temperature and composition.",
+ "Diffusion|Atoms moving through solids (Fick's laws).",
+ "Classes of materials|Metals, ceramics, polymers and composites and why they differ.",
+ "Electrical and thermal properties|Why some materials conduct and others insulate."]),
+C("FIZ206","FİZ206","Mathematical Methods in Physics I","2021 Fall","BSc","Mathematics",[
+ "Linear algebra|Matrices, determinants, eigenvalues and eigenvectors.",
+ "Complex numbers and functions|Euler's formula and functions of a complex variable.",
+ "Vector analysis and coordinates|Gradient, divergence and curl in Cartesian, cylindrical and spherical coordinates.",
+ "Fourier series|Writing a periodic function as a sum of sines and cosines.",
+ "Series solutions of ODEs|Solving differential equations with power series (Frobenius).",
+ "Special functions|Legendre polynomials, Bessel functions and the gamma function."]),
+C("FIZ207","FİZ207","Introduction to Nanotechnology","2021 Fall","BSc","Engineering",[
+ "Nanoscale size effects|Why properties change when objects are 1–100 nm in size.",
+ "Fabrication methods|Top-down (lithography) and bottom-up (self-assembly, chemical growth).",
+ "Characterization tools|Seeing the nanoscale with SEM, TEM and AFM.",
+ "Nanomaterials|Carbon nanotubes, graphene, nanoparticles and quantum dots.",
+ "Applications|Uses in electronics, medicine, energy and coatings."]),
+C("FIZ209","FİZ209","Optics","2021 Fall","BSc","Physics",[
+ "Geometric optics|Reflection, refraction (Snell's law), lenses and mirrors.",
+ "Optical instruments|How microscopes, telescopes and cameras form images.",
+ "Interference|Overlapping waves add up or cancel (double slit, thin films).",
+ "Diffraction|Light spreading around edges and through gratings.",
+ "Polarization|The direction of the light's electric field; polarizers and Malus's law.",
+ "Lasers|Stimulated emission and why laser light is coherent."]),
+C("MAT201","MAT201","Differential Equations","2021 Fall","BSc","Mathematics",[
+ "First-order ODEs|Separable, linear and exact equations.",
+ "Second-order linear ODEs|Constant-coefficient equations and the characteristic equation.",
+ "Nonhomogeneous equations|Undetermined coefficients and variation of parameters.",
+ "Laplace transform|Turning a differential equation into an algebra problem.",
+ "Systems of ODEs|Several coupled equations solved with matrices and eigenvalues.",
+ "Series solutions|Solving ODEs with power series near ordinary points."]),
+
+C("FIZ114M","FİZ 114","Introduction to MATLAB Programming","2022 Spring","BSc","Computing",[
+ "MATLAB environment and scripts|The workspace, command window and writing .m scripts.",
+ "Matrices and vectorization|Doing math on whole arrays at once instead of loops.",
+ "Plotting|2D and 3D plots, labels and subplots.",
+ "Functions and control flow|Writing your own functions with if/for/while.",
+ "Numerical tools|Built-in solvers such as fzero, ode45 and polyfit.",
+ "Data import and analysis|Reading data files and computing statistics."],{overlap:["FIZ114"]}),
+C("FIZ201","FİZ201","Numerical Methods in Engineering","2022 Spring","BSc","Mathematics",[
+ "Errors and floating point|Round-off and truncation errors in computer arithmetic.",
+ "Root finding|Bisection, Newton–Raphson and secant methods.",
+ "Linear systems|Gaussian elimination and LU decomposition.",
+ "Interpolation and curve fitting|Passing curves through data points; least-squares fits.",
+ "Numerical integration and differentiation|Trapezoidal and Simpson's rules; finite differences.",
+ "Numerical ODE solvers|Euler and Runge–Kutta methods."],{overlap:["MAT320"]}),
+C("FIZ202","FİZ202","Electronics I","2022 Spring","BSc","Engineering",[
+ "Semiconductors and the pn junction|Doping, holes and electrons, and the depletion region.",
+ "Diodes and rectifiers|One-way current flow; turning AC into DC.",
+ "Bipolar transistors (BJT)|Current-controlled amplifiers and switches.",
+ "Field-effect transistors (MOSFET)|Voltage-controlled transistors used in modern chips.",
+ "Biasing and small-signal amplifiers|Setting the operating point and computing gain.",
+ "Op-amp basics|Inverting and non-inverting amplifiers using ideal op-amp rules."]),
+C("FIZ204","FİZ204","Quantum Mechanics for Engineers","2022 Spring","BSc","Physics",[
+ "Wave function and probability||ψ|² gives the probability of finding a particle somewhere.",
+ "Schrödinger equation|The equation that tells how the wave function behaves.",
+ "Potential wells and tunneling|Particles in boxes have discrete energies and can pass through barriers.",
+ "Harmonic oscillator|Equally spaced energy levels E = ħω(n + ½).",
+ "Operators and expectation values|Observables are operators; measuring gives eigenvalues.",
+ "Hydrogen atom and spin|Quantum numbers n, l, m and the electron's intrinsic spin."]),
+C("FIZ252","FİZ252","Electronics I Laboratory","2022 Spring","BSc","Labs & projects",[
+ "Diode circuits|Building rectifiers and clippers and checking their outputs.",
+ "Transistor amplifiers|Measuring the gain of BJT and FET amplifiers.",
+ "Op-amp circuits|Building amplifiers, adders and comparators.",
+ "Breadboarding and measurement|Wiring circuits and debugging them with instruments."]),
+C("OHS","IMU058","Occupational Health and Safety","2022 Spring","BSc","General education",[
+ "Hazards and risk assessment|Identifying workplace dangers and rating their risk.",
+ "Safety rules and protective equipment|Legal duties and PPE."],{gen:true}),
+C("MDB202","MDB202","Thermodynamics","2022 Spring","BSc","Physics",[
+ "Systems and properties|Closed and open systems; state, pressure, temperature, volume.",
+ "First law|Energy is conserved: ΔU = Q − W; energy balances.",
+ "Properties of pure substances|Phase changes and reading steam tables.",
+ "Second law and entropy|Heat flows hot to cold; entropy of an isolated system never decreases.",
+ "Heat engines and refrigerators|Efficiency limits and the Carnot cycle.",
+ "Power and refrigeration cycles|Rankine, Otto, Diesel and vapor-compression cycles."],{note:"Retaken in 2023 Spring; final grade shown."}),
+
+C("BYM310","BYM310","Biomaterials","2022 Fall","BSc","Engineering",[
+ "Biocompatibility|How the body reacts to a material placed inside it.",
+ "Material classes for medicine|Metals, ceramics and polymers used in the body.",
+ "Tissue–material interaction|Protein adsorption, inflammation and integration.",
+ "Applications|Implants, stents, dental and orthopedic devices."]),
+C("FIZ301","FİZ301","Classical Mechanics","2022 Fall","BSc","Physics",[
+ "Non-inertial frames|Fictitious forces such as centrifugal and Coriolis.",
+ "Lagrangian mechanics|Deriving equations of motion from L = T − V.",
+ "Hamiltonian mechanics|Describing motion with positions and momenta in phase space.",
+ "Central forces and orbits|Kepler problem and orbits under gravity.",
+ "Small oscillations|Normal modes of coupled oscillators.",
+ "Rigid body motion|Inertia tensor and Euler's equations."],{overlap:["FIZ103"]}),
+C("FIZ303","FİZ303","Internship I","2022 Fall","BSc","Labs & projects",[
+ "Workplace tasks|What you actually did during the internship. Add details in the notes.",
+ "Tools and methods used|Software, instruments or processes you used.",
+ "Internship report|Documenting the work in a formal report."],{note:"Completed in 2023 Fall."}),
+C("FIZ305","FİZ305","Computer Aided Design and Modelling I","2022 Fall","BSc","Engineering",[
+ "2D sketching and constraints|Drawing profiles with dimensions and geometric constraints.",
+ "3D part modelling|Extrude, revolve, fillet and similar features.",
+ "Assemblies|Putting parts together with mates.",
+ "Drawings from models|Generating technical drawings from 3D parts."]),
+C("FIZ351","FİZ351","Modern Physics Laboratory","2022 Fall","BSc","Labs & projects",[
+ "Photoelectric effect|Measuring Planck's constant from stopping voltages.",
+ "Electron charge-to-mass ratio|Measuring e/m with electron beams in a magnetic field.",
+ "Franck–Hertz experiment|Evidence for discrete atomic energy levels.",
+ "Atomic spectra|Measuring emission lines with a spectrometer.",
+ "Electron diffraction|Seeing the wave nature of electrons."]),
+C("FIZ353","FİZ353","Advanced Physics Laboratory I","2022 Fall","BSc","Labs & projects",[
+ "X-ray diffraction|Finding crystal structure from diffraction angles (Bragg's law).",
+ "Hall effect|Measuring carrier type and density in a conductor.",
+ "Radiation detection|Using Geiger counters and scintillators.",
+ "Data fitting|Fitting models to data and reporting parameters with uncertainty."]),
+C("FIZ369","FİZ369","Radiation Physics","2022 Fall","BSc","Physics",[
+ "Types of radiation|Alpha, beta, gamma, X-rays and neutrons.",
+ "Radioactive decay|The decay law N = N₀e^(−λt) and half-life.",
+ "Radiation–matter interaction|Photoelectric effect, Compton scattering, pair production; stopping power.",
+ "Radiation detectors|Gas, scintillation and semiconductor detectors.",
+ "Dosimetry|Absorbed and equivalent dose (Gy, Sv).",
+ "Radiation protection|Time, distance and shielding."]),
+C("ATA1","IMU021","History of Atatürk's Principles and Revolutions I","2022 Fall","BSc","General education",[
+ "Late Ottoman and independence period|Historical events leading to the Republic."],{gen:true}),
+
+C("FIZ302","FİZ302","Electromagnetic Theory","2023 Spring","BSc","Physics",[
+ "Boundary value problems|Solving Laplace's equation; method of images.",
+ "Multipole expansion|Approximating fields far from a charge distribution.",
+ "Fields in matter|Polarization, dielectrics and magnetization.",
+ "Magnetostatics|Vector potential and magnetic fields of steady currents.",
+ "Maxwell's equations|The four equations that unify electricity and magnetism.",
+ "Electromagnetic waves|Plane waves, reflection, refraction and energy flow (Poynting vector)."],{overlap:["FIZ104","FIZ5104"],note:"Retaken in 2024 Spring; final grade shown."}),
+C("FIZ304","FİZ304","Solid State Physics","2023 Spring","BSc","Physics",[
+ "Crystal lattices|Bravais lattices, unit cells and the reciprocal lattice.",
+ "X-ray diffraction|How crystal structure is measured (Bragg and Laue conditions).",
+ "Phonons|Quantized lattice vibrations and heat capacity.",
+ "Free electron model|Electrons in metals as a gas; Fermi energy.",
+ "Band theory|Why solids are metals, semiconductors or insulators.",
+ "Semiconductors|Intrinsic and doped semiconductors; carrier concentrations."]),
+C("FIZ354","FİZ354","Advanced Physics Laboratory II","2023 Spring","BSc","Labs & projects",[
+ "Zeeman effect|Splitting of spectral lines in a magnetic field.",
+ "Spectroscopy|Measuring and interpreting spectra precisely.",
+ "Experiment design|Planning measurements and controlling errors.",
+ "Scientific reporting|Writing reports in a journal-like format."]),
+C("ATA2","IMU022","History of Atatürk's Principles and Revolutions II","2023 Spring","BSc","General education",[
+ "Reforms of the Republic|Political, social and legal reforms."],{gen:true}),
+C("INS102","INS102","Computer Aided Technical Drawing","2023 Spring","BSc","Engineering",[
+ "Drawing standards|Line types, scales and title blocks.",
+ "Orthographic projection|Front, top and side views of an object.",
+ "Sections and dimensioning|Cutting views and placing dimensions correctly.",
+ "CAD drawing tools|Drawing technical sheets in software such as AutoCAD."],{overlap:["FIZ305"]}),
+C("IST182","IST182","Statistical Data Analysis","2023 Spring","BSc","Data & AI",[
+ "Descriptive statistics|Mean, median, variance and summary plots.",
+ "Confidence intervals|A range likely to contain the true value.",
+ "Hypothesis tests|t-tests, chi-square tests and p-values.",
+ "Correlation and regression|Measuring and modelling relationships between variables.",
+ "Statistical software|Running analyses in a tool such as SPSS, R or Excel."],{overlap:["MAT218","MAT105"]}),
+C("MAT218","MAT218","Statistics","2023 Spring","BSc","Mathematics",[
+ "Random variables and distributions|Binomial, Poisson, normal and others.",
+ "Sampling distributions and CLT|Averages of many samples tend to be normally distributed.",
+ "Estimation|Point estimates, maximum likelihood and confidence intervals.",
+ "Hypothesis testing|Deciding with data, and the risk of type I and II errors.",
+ "Linear regression|Fitting a line by least squares and interpreting it."],{overlap:["IST182","MAT105"]}),
+C("MDB306","MDB306","Technical Writing and Presentation","2023 Spring","BSc","Engineering",[
+ "Report structure|Abstract, introduction, method, results, discussion.",
+ "Scientific style|Clear, precise and objective writing.",
+ "Citations and references|Citing sources correctly and avoiding plagiarism.",
+ "Presentations|Designing slides and presenting technical work."]),
+C("TAR108","TAR-108","History of Islam","2023 Spring","BSc","General education",[
+ "Early Islamic history|Main events and figures."],{gen:true}),
+
+C("EEM341","EEM341","Electromechanical Energy Conversion","2023 Fall","BSc","Engineering",[
+ "Magnetic circuits|Flux, reluctance and magnetic materials.",
+ "Transformers|Changing AC voltage levels; equivalent circuits and losses.",
+ "Energy conversion principles|How force and torque come from magnetic energy.",
+ "DC machines|DC motors and generators.",
+ "Induction motors|The most common AC motor; slip and torque curves.",
+ "Synchronous machines|Generators in power plants; machines locked to grid frequency."]),
+C("FIZ401","FİZ401","Statistical Physics","2023 Fall","BSc","Physics",[
+ "Microstates and entropy|Entropy counts microstates: S = k ln Ω.",
+ "Ensembles|Microcanonical, canonical and grand canonical descriptions.",
+ "Partition function|One function from which all thermodynamic quantities follow.",
+ "Maxwell–Boltzmann statistics|Classical distribution of particle energies.",
+ "Quantum statistics|Bose–Einstein and Fermi–Dirac distributions.",
+ "Applications|Ideal gases, blackbody radiation and heat capacity of solids."],{overlap:["MDB202"]}),
+C("FIZ403","FİZ403","Internship II","2023 Fall","BSc","Labs & projects",[
+ "Workplace tasks|What you did during the second internship. Add details in the notes.",
+ "Tools and methods used|Software, instruments or processes you used."]),
+C("FIZ451","FİZ451","Graduation Project I","2023 Fall","BSc","Labs & projects",[
+ "Literature review|Finding and summarizing prior work on the topic.",
+ "Problem definition|Stating the research question and scope.",
+ "Method and setup|Choosing simulations, experiments or analysis methods."]),
+C("FIZ461","FİZ461","Particle Physics","2023 Fall","BSc","Physics",[
+ "Standard Model particles|Quarks, leptons and gauge bosons.",
+ "Fundamental forces|Strong, weak, electromagnetic and their carrier particles.",
+ "Conservation laws|Charge, baryon number, lepton number and symmetries.",
+ "Feynman diagrams|Pictures of particle interactions.",
+ "Hadrons and quarks|How quarks combine into protons, neutrons and mesons.",
+ "Accelerators and detectors|How particles are produced and measured."]),
+C("FIZ471","FİZ471","Computer Aided Design and Modeling II","2023 Fall","BSc","Engineering",[
+ "Advanced modelling|Surfaces, sheet metal and complex features.",
+ "Simulation basics|Stress or motion analysis with finite elements.",
+ "Assemblies and motion|Mechanisms and moving parts.",
+ "Rendering and prototyping|Preparing models for rendering or 3D printing."],{overlap:["FIZ305"]}),
+C("MAT105","MAT105","Probability and Statistics","2023 Fall","BSc","Mathematics",[
+ "Counting and probability|Permutations, combinations and basic probability rules.",
+ "Conditional probability and Bayes|Updating probabilities with new information.",
+ "Discrete distributions|Binomial, geometric and Poisson.",
+ "Continuous distributions|Uniform, exponential and normal.",
+ "Expectation and variance|The average value and the spread of a random variable."],{overlap:["MAT218","IST182"]}),
+
+C("FIZ402","FİZ402","Nuclear Physics","2024 Spring","BSc","Physics",[
+ "Nuclear properties|Size, mass, binding energy and stability.",
+ "Nuclear models|Liquid drop model and shell model.",
+ "Radioactive decays|Alpha, beta and gamma decay mechanisms.",
+ "Nuclear reactions|Cross sections and reaction energetics (Q-value).",
+ "Fission and fusion|Splitting heavy and joining light nuclei to release energy."],{overlap:["FIZ369","FIZ5102"]}),
+C("FIZ452","FİZ452","Graduation Project II","2024 Spring","BSc","Labs & projects",[
+ "Results and analysis|Producing and interpreting the project's results.",
+ "Thesis writing|Writing up the full project.",
+ "Defense|Presenting and defending the work."]),
+C("FIZ462","FİZ462","Electronics II","2024 Spring","BSc","Engineering",[
+ "Multistage and differential amplifiers|Cascading stages and amplifying the difference between two inputs.",
+ "Frequency response|How gain changes with frequency; Bode plots.",
+ "Feedback|Using feedback to stabilize gain and bandwidth.",
+ "Oscillators|Circuits that generate periodic signals.",
+ "Active filters|Low-pass, high-pass and band-pass filters with op-amps."],{overlap:["FIZ202"]}),
+C("FIZ468","FİZ468","Special Topics in Physics","2024 Spring","BSc","Physics",[
+ "Course subject|This course changes each year. Add what yours covered in the notes or as your own topics."]),
+C("MAT318","MAT318","Partial Differential Equations","2024 Spring","BSc","Mathematics",[
+ "Classification of PDEs|Elliptic, parabolic and hyperbolic equations.",
+ "Heat equation|How temperature spreads over time.",
+ "Wave equation|Vibrating strings and waves.",
+ "Laplace equation|Steady-state problems such as potentials.",
+ "Separation of variables|Splitting a PDE into ODEs and summing Fourier series.",
+ "Boundary and initial conditions|Dirichlet, Neumann and how they fix a unique solution."]),
+C("MAT320","MAT320","Numerical Analysis","2024 Spring","BSc","Mathematics",[
+ "Error and conditioning|How sensitive a problem is to small input changes.",
+ "Nonlinear equations|Fixed-point iteration and convergence rates.",
+ "Iterative linear solvers|Jacobi and Gauss–Seidel methods.",
+ "Interpolation and splines|Polynomial and piecewise-polynomial approximation.",
+ "Least squares|Best-fit solutions for overdetermined systems.",
+ "Numerical integration and ODEs|Quadrature rules and step-by-step ODE solvers."],{overlap:["FIZ201"]}),
+C("MAT419","MAT419","Optimization Techniques","2024 Spring","BSc","Mathematics",[
+ "Problem formulation|Objective function, variables and constraints.",
+ "Linear programming|Optimizing a linear objective with the simplex method.",
+ "Unconstrained optimization|Gradient descent and Newton's method.",
+ "Constrained optimization|Lagrange multipliers and KKT conditions.",
+ "Convexity|Why convex problems have one global minimum.",
+ "Heuristic methods|Genetic algorithms and simulated annealing."]),
+
+C("BLM5110","BLM5110","Machine Learning","2025 Fall","MSc","Data & AI",[
+ "Supervised vs unsupervised learning|Learning from labelled examples vs finding structure in unlabelled data.",
+ "Linear and logistic regression|Predicting numbers and probabilities with linear models.",
+ "Decision trees and ensembles|Tree models, random forests and gradient boosting.",
+ "Support vector machines|Finding the widest-margin boundary between classes; kernels.",
+ "k-NN and clustering|Nearest-neighbour prediction and k-means clustering.",
+ "Neural network basics|Layers, activations and training by backpropagation.",
+ "Model evaluation|Train/test splits, cross-validation, accuracy, precision, recall.",
+ "Overfitting and regularization|When a model memorizes noise, and L1/L2 penalties to prevent it.",
+ "Dimensionality reduction|PCA and reducing many features to a few."]),
+C("FIZ5102","FIZ5102","Nuclear Theory 1","2025 Fall","MSc","Physics",[
+ "Nucleon–nucleon force|Properties of the nuclear force; the deuteron.",
+ "Shell model|Magic numbers and single-particle states.",
+ "Collective model|Rotations and vibrations of deformed nuclei.",
+ "Isospin|Treating protons and neutrons as two states of one particle.",
+ "Electromagnetic transitions|Gamma decay selection rules."],{overlap:["FIZ402"]}),
+C("FIZ5104","FIZ5104","Electromagnetic Theory 1","2025 Fall","MSc","Physics",[
+ "Green's functions|A general way to solve boundary-value problems.",
+ "Multipoles|Spherical harmonics expansion of fields.",
+ "Electrostatics in matter|Dielectrics and boundary conditions at interfaces.",
+ "Magnetostatics|Fields from currents and magnetic materials.",
+ "Maxwell's equations and conservation laws|Energy and momentum carried by fields.",
+ "Plane waves and waveguides|Propagation in media and inside metal guides."],{overlap:["FIZ302"]}),
+C("IST5118","IST5118","Applied Time Series Analysis","2025 Fall","MSc","Data & AI",[
+ "Stationarity|When a series' statistics do not change over time; differencing.",
+ "ACF and PACF|Correlation of a series with its own past, used to pick models.",
+ "Trend and seasonality|Splitting a series into trend, seasonal and residual parts.",
+ "AR, MA and ARMA models|Predicting from past values and past errors.",
+ "ARIMA and SARIMA|ARMA with differencing and seasonal terms.",
+ "Forecasting and evaluation|Making forecasts and measuring error (MAE, RMSE)."]),
+C("MTM5131","MTM5131","Mathematical Foundations of Artificial Intelligence","2025 Fall","MSc","Data & AI",[
+ "Linear algebra for AI|Vectors, matrices, eigen-decomposition and SVD.",
+ "Multivariable calculus|Gradients, Jacobians and the chain rule.",
+ "Probability for AI|Distributions, Bayes' rule and maximum likelihood.",
+ "Optimization|Gradient descent, its variants and convexity.",
+ "Information theory|Entropy, cross-entropy and KL divergence.",
+ "Backpropagation math|Applying the chain rule through a neural network."],{overlap:["MAT419","MAT105"]}),
+C("VBL5160","VBL5160","Introduction to Big Data","2026 Spring","MSc","Data & AI",[
+ "What makes data big|Volume, velocity, variety and the limits of one machine.",
+ "Distributed storage|Storing data across many machines (HDFS).",
+ "MapReduce|Processing data in parallel with map and reduce steps.",
+ "Apache Spark|In-memory distributed processing with DataFrames.",
+ "NoSQL databases|Key-value, document, column and graph stores.",
+ "Batch vs stream processing|Processing stored data vs data as it arrives."])
+];
+const TERMS = [...new Set(COURSES.map(c => c.term))];
+const byId = Object.fromEntries(COURSES.map(c => [c.id, c]));
+const STATUS_LABEL = { known: "Know it", unsure: "Not sure", none: "Not taken" };
+const TIME_LABEL = { "": "Time spent: not set", light: "Light", moderate: "Moderate", heavy: "Heavy", focus: "Main focus" };
+
+// ---------- State ----------
+const KEY = "courseMap.v1";
+const blank = () => ({ status: {}, understood: {}, hiddenTopics: {}, removed: {}, custom: {}, time: {}, notes: {}, about: "" });
+let S = blank();
+try { const raw = localStorage.getItem(KEY); if (raw) S = Object.assign(blank(), JSON.parse(raw)); } catch (e) {}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} };
+
+const isRemoved = c => (c.id in S.removed) ? S.removed[c.id] : !!c.gen;
+const split = s => { const i = s.indexOf("|"); return [s.slice(0, i), s.slice(i + 1)]; };
+function topicsOf(c) {
+  const base = c.topics.map((s, i) => { const [name, expl] = split(s); return { tid: c.id + ":" + i, name, expl }; })
+    .filter(t => !S.hiddenTopics[t.tid]);
+  const own = (S.custom[c.id] || []).map(t => ({ tid: t.tid, name: t.name, expl: "", custom: true }));
+  return base.concat(own);
+}
+const hiddenCount = c => c.topics.filter((_, i) => S.hiddenTopics[c.id + ":" + i]).length;
+const esc = s => String(s).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+
+function tally(list) {
+  const t = { known: 0, reviewed: 0, unsure: 0, none: 0, open: 0, total: list.length };
+  for (const x of list) {
+    const s = S.status[x.tid];
+    if (s === "known") t.known++;
+    else if ((s === "unsure" || s === "none") && S.understood[x.tid]) t.reviewed++;
+    else if (s === "unsure") t.unsure++;
+    else if (s === "none") t.none++;
+    else t.open++;
+  }
+  return t;
+}
+const SEG = [["known", "var(--known)"], ["reviewed", "var(--reviewed)"], ["unsure", "var(--unsure)"], ["none", "var(--none)"]];
+const segs = t => SEG.map(([k, col]) => `<i style="width:${t.total ? (t[k] / t.total * 100) : 0}%;background:${col}"></i>`).join("");
+
+// ---------- Filters ----------
+const F = { q: "", prog: "", area: "", todo: false };
+document.getElementById("areas").innerHTML = ["", ...AREAS].map(a => `<button class="chip" data-area="${esc(a)}" aria-pressed="${a === "" ? "true" : "false"}">${a || "All areas"}</button>`).join("");
+
+function visible(c) {
+  if (isRemoved(c)) return false;
+  if (F.prog && c.prog !== F.prog) return false;
+  if (F.area && c.area !== F.area) return false;
+  const ts = topicsOf(c);
+  if (F.todo && !ts.some(t => !S.status[t.tid])) return false;
+  if (F.q) {
+    const q = F.q.toLowerCase();
+    const hay = [c.code, c.name, ...ts.map(t => t.name)].join(" ").toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+// ---------- Rendering ----------
+const open = new Set();
+function topicHTML(t) {
+  const s = S.status[t.tid] || "";
+  const ok = !!S.understood[t.tid];
+  const btns = ["known", "unsure", "none"].map(v => `<button data-act="status" data-tid="${t.tid}" data-v="${v}" aria-pressed="${s === v}">${STATUS_LABEL[v]}</button>`).join("");
+  let extra = "";
+  if (s === "unsure" || s === "none") {
+    extra = `<div class="explain${ok ? " ok" : ""}">
+      ${t.expl ? `<div>${esc(t.expl)}</div>` : `<div>Your own topic. Look it up, then tick the box once the basics make sense.</div>`}
+      <label><input type="checkbox" data-act="understood" data-tid="${t.tid}" ${ok ? "checked" : ""}> I understand the basics now</label>
+    </div>`;
+  }
+  return `<div class="topic" data-tid="${t.tid}">
+    <div class="trow">
+      <span class="tname">${esc(t.name)}</span>
+      <span class="seg" role="group" aria-label="${esc(t.name)}">${btns}</span>
+      <button class="x" data-act="${t.custom ? "delCustom" : "hideTopic"}" data-tid="${t.tid}" title="${t.custom ? "Delete this topic" : "This topic was not part of my course"}" aria-label="Remove topic">×</button>
+    </div>${extra}
+  </div>`;
+}
+function courseHTML(c) {
+  const ts = topicsOf(c), t = tally(ts), hid = hiddenCount(c), g = GRADES[c.id];
+  const overlaps = (c.overlap || []).map(id => byId[id]).filter(o => o && !isRemoved(o));
+  return `<details class="course" data-cid="${c.id}" ${open.has(c.id) ? "open" : ""}>
+    <summary>
+      <span class="code">${esc(c.code)}</span>
+      <span class="cname">${esc(c.name)}<small>${esc(c.area)}${S.time[c.id] ? " · " + TIME_LABEL[S.time[c.id]] : ""}</small></span>
+      <span class="meta">${g ? `<span class="tag grade" title="Grade">${esc(g)}</span>` : ""}<span class="mini" aria-hidden="true">${segs(t)}</span><span class="count">${t.total - t.open}/${t.total}</span></span>
+    </summary>
+    <div class="cbody">
+      ${c.note ? `<div class="lbl" style="margin-top:8px;text-transform:none;letter-spacing:0">${esc(c.note)}</div>` : ""}
+      ${overlaps.length ? `<div class="note-overlap">Overlaps with ${overlaps.map(o => esc(o.name)).join(", ")}. Remove this course or its repeated topics if they are the same material.</div>` : ""}
+      ${ts.map(topicHTML).join("") || `<p class="lbl" style="text-transform:none">No topics left. Add your own below.</p>`}
+      ${hid ? `<p style="margin:8px 0 0"><button class="linkbtn" data-act="restoreTopics" data-cid="${c.id}">Bring back ${hid} removed topic${hid > 1 ? "s" : ""}</button></p>` : ""}
+      <form class="cfoot" data-act="addTopic" data-cid="${c.id}">
+        <input type="text" class="grow" id="add-${c.id}" placeholder="Add a topic this course covered…" aria-label="New topic for ${esc(c.name)}">
+        <button class="btn" type="submit">Add topic</button>
+      </form>
+      <div class="cfoot">
+        <select id="time-${c.id}" data-act="time" data-cid="${c.id}" aria-label="Time spent">${Object.entries(TIME_LABEL).map(([k, v]) => `<option value="${k}" ${(S.time[c.id] || "") === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+        <input type="text" class="grow" id="note-${c.id}" data-act="note" data-cid="${c.id}" value="${esc(S.notes[c.id] || "")}" placeholder="Notes (tools used, project title, what stuck…)" aria-label="Notes for ${esc(c.name)}">
+      </div>
+      <div class="cfoot">
+        <button class="btn" data-act="allKnown" data-cid="${c.id}">Mark all as Know it</button>
+        <button class="btn warn" data-act="remove" data-cid="${c.id}">Remove course</button>
+      </div>
+    </div>
+  </details>`;
+}
+function renderCourses() {
+  const html = TERMS.map(term => {
+    const list = COURSES.filter(c => c.term === term && visible(c));
+    if (!list.length) return "";
+    const prog = list[0].prog;
+    return `<section class="term"><div class="term-head"><h2>${esc(term)}</h2><span>${prog} · ${list.length} course${list.length > 1 ? "s" : ""}</span></div>${list.map(courseHTML).join("")}</section>`;
+  }).join("");
+  document.getElementById("courses").innerHTML = html || `<div class="empty">No courses match these filters.</div>`;
+  renderRemoved();
+}
+function rerenderCourse(cid) {
+  const el = document.querySelector(`.course[data-cid="${cid}"]`);
+  if (el) el.outerHTML = courseHTML(byId[cid]);
+}
+function renderRemoved() {
+  const list = COURSES.filter(isRemoved);
+  const box = document.getElementById("removed");
+  box.hidden = !list.length;
+  const wasOpen = box.open;
+  box.innerHTML = `<summary>Removed courses (${list.length})</summary>
+    <p class="lbl" style="text-transform:none;letter-spacing:0;margin:8px 0 0">These are left out of your AI profile. General education courses start here.</p>
+    <ul>${list.map(c => `<li><span><span class="code">${esc(c.code)}</span> ${esc(c.name)}</span><button class="linkbtn" data-act="restore" data-cid="${c.id}">Restore</button></li>`).join("")}</ul>`;
+  box.open = wasOpen;
+}
+function renderStats() {
+  const all = COURSES.filter(c => !isRemoved(c)).flatMap(topicsOf);
+  const t = tally(all);
+  const n = COURSES.filter(c => !isRemoved(c)).length;
+  const stat = (v, label, col) => `<div class="stat">${col ? `<span class="dot" style="background:${col}"></span>` : ""}<b>${v}</b><span>${label}</span></div>`;
+  document.getElementById("stats").innerHTML =
+    stat(n, "courses") + stat(t.known, "know it", "var(--known)") + stat(t.reviewed, "learned the basics", "var(--reviewed)") +
+    stat(t.unsure, "not sure", "var(--unsure)") + stat(t.none, "not taken", "var(--none)") + stat(t.open, "left to mark", "var(--sunk)");
+  document.getElementById("bar").innerHTML = segs(t);
+}
+
+// ---------- Output ----------
+function groupLines(filterFn) {
+  const out = {};
+  for (const c of COURSES) {
+    if (isRemoved(c)) continue;
+    const names = topicsOf(c).filter(filterFn).map(t => t.name);
+    if (!names.length) continue;
+    const g = GRADES[c.id];
+    (out[c.area] = out[c.area] || []).push(`- ${c.name} (${c.prog}${g && g !== "Pass" ? ", grade " + g : ""}): ${names.join("; ")}`);
+  }
+  return AREAS.filter(a => out[a]).map(a => `### ${a}\n${out[a].join("\n")}`).join("\n\n");
+}
+function buildMarkdown() {
+  const st = tid => S.status[tid];
+  const L = ["# My academic background", "", "Context for an AI assistant, built from my university transcripts and my own self-assessment of each course topic.", "", "## Education"];
+  for (const p of ["BSc", "MSc"]) L.push(`- ${PROGRAMS[p]}${GPA[p] ? ` — CGPA ${GPA[p]}/4.00` : ""}`);
+  if (S.about.trim()) L.push("", "## About me", S.about.trim());
+  const times = ["focus", "heavy", "moderate", "light"].map(k => {
+    const cs = COURSES.filter(c => !isRemoved(c) && S.time[c.id] === k).map(c => c.name);
+    return cs.length ? `- ${TIME_LABEL[k]}: ${cs.join(", ")}` : "";
+  }).filter(Boolean);
+  if (times.length) L.push("", "## Where I spent my time", ...times);
+  const sec = (title, intro, fn) => { const body = groupLines(fn); if (body) L.push("", `## ${title}`, intro, "", body); };
+  sec("Topics I know well", "Build on these. No need to explain basics here.", t => st(t.tid) === "known");
+  sec("Topics I understand at a basic level", "I was unsure of these or never covered them, but I have reviewed the fundamentals.", t => (st(t.tid) === "unsure" || st(t.tid) === "none") && S.understood[t.tid]);
+  sec("Topics I am not sure about", "I saw these in class but my understanding is shaky. Explain them carefully and check my understanding.", t => st(t.tid) === "unsure" && !S.understood[t.tid]);
+  sec("Topics I never covered", "Treat these as new to me. Start from the fundamentals.", t => st(t.tid) === "none" && !S.understood[t.tid]);
+  const notes = COURSES.filter(c => !isRemoved(c) && (S.notes[c.id] || "").trim()).map(c => `- ${c.name}: ${S.notes[c.id].trim()}`);
+  if (notes.length) L.push("", "## Course notes", ...notes);
+  L.push("", "## How to use this", "- Connect new material to topics I know well (physics, mathematics, numerical methods) when it helps.", "- For topics I am unsure about or never covered, start from intuition, then the math.", "- My degrees were taught in Turkish; I may know some terms in Turkish first.");
+  return L.join("\n");
+}
+function buildRag() {
+  const known = COURSES.filter(c => !isRemoved(c)).flatMap(c => topicsOf(c).filter(t => S.status[t.tid] === "known").map(t => t.name));
+  return JSON.stringify({
+    name: "Learner profile — academic background",
+    domain: "Personal background",
+    topic: "Learner profile",
+    description: "Self-assessed coverage of every course topic from my BSc and MSc transcripts. Use it to tailor explanations.",
+    topics: [...new Set(known)],
+    transcript: buildMarkdown()
+  }, null, 2);
+}
+let tab = "md";
+const HELP = {
+  md: "Paste this at the start of a chat, or save it in your AI's custom instructions or project knowledge.",
+  rag: "Paste into the agent's manual source box with input format “json”. It becomes a searchable source about you.",
+  backup: "Your answers are saved in this browser only. Copy this to keep them safe or move them to another device."
+};
+function renderOut() {
+  const out = document.getElementById("out");
+  out.value = tab === "md" ? buildMarkdown() : tab === "rag" ? buildRag() : JSON.stringify(S, null, 1);
+  document.getElementById("tabhelp").textContent = HELP[tab];
+  document.getElementById("restoreBox").hidden = tab !== "backup";
+}
+let outTimer;
+const refresh = () => { renderStats(); clearTimeout(outTimer); outTimer = setTimeout(renderOut, 120); };
+
+// ---------- Events ----------
+const courses = document.getElementById("courses");
+courses.addEventListener("click", e => {
+  const b = e.target.closest("button[data-act]"); if (!b) return;
+  const { act, tid, cid: bc, v } = b.dataset;
+  const cid = bc || (tid && tid.split(":")[0]);
+  if (act === "status") { S.status[tid] = S.status[tid] === v ? undefined : v; if (!S.status[tid]) delete S.status[tid]; }
+  else if (act === "hideTopic") { S.hiddenTopics[tid] = true; delete S.status[tid]; delete S.understood[tid]; }
+  else if (act === "delCustom") { S.custom[cid] = (S.custom[cid] || []).filter(t => t.tid !== tid); delete S.status[tid]; delete S.understood[tid]; }
+  else if (act === "restoreTopics") { byId[cid].topics.forEach((_, i) => delete S.hiddenTopics[cid + ":" + i]); }
+  else if (act === "allKnown") { topicsOf(byId[cid]).forEach(t => S.status[t.tid] = "known"); }
+  else if (act === "remove") { S.removed[cid] = true; open.delete(cid); save(); renderCourses(); refresh(); return; }
+  else return;
+  save(); rerenderCourse(cid); refresh();
+});
+courses.addEventListener("change", e => {
+  const el = e.target;
+  if (el.dataset.act === "understood") { const tid = el.dataset.tid; if (el.checked) S.understood[tid] = true; else delete S.understood[tid]; save(); rerenderCourse(tid.split(":")[0]); refresh(); }
+  if (el.dataset.act === "time") { S.time[el.dataset.cid] = el.value; if (!el.value) delete S.time[el.dataset.cid]; save(); rerenderCourse(el.dataset.cid); refresh(); }
+});
+courses.addEventListener("input", e => {
+  const el = e.target;
+  if (el.dataset.act === "note") { S.notes[el.dataset.cid] = el.value; save(); refresh(); }
+});
+courses.addEventListener("submit", e => {
+  e.preventDefault();
+  const f = e.target, cid = f.dataset.cid, inp = f.querySelector("input"), name = inp.value.trim();
+  if (!name) return;
+  const list = S.custom[cid] = S.custom[cid] || [];
+  list.push({ tid: cid + ":c" + Date.now().toString(36), name });
+  save(); rerenderCourse(cid); refresh();
+  const again = document.getElementById("add-" + cid); if (again) again.focus();
+});
+document.addEventListener("toggle", e => {
+  const d = e.target; if (!d.classList || !d.classList.contains("course")) return;
+  d.open ? open.add(d.dataset.cid) : open.delete(d.dataset.cid);
+}, true);
+document.getElementById("removed").addEventListener("click", e => {
+  const b = e.target.closest("button[data-act=restore]"); if (!b) return;
+  S.removed[b.dataset.cid] = false; save(); renderCourses(); refresh();
+});
+document.getElementById("q").addEventListener("input", e => { F.q = e.target.value.trim(); renderCourses(); });
+document.getElementById("prog").addEventListener("change", e => { F.prog = e.target.value; renderCourses(); });
+document.getElementById("todo").addEventListener("change", e => { F.todo = e.target.checked; renderCourses(); });
+document.getElementById("areas").addEventListener("click", e => {
+  const b = e.target.closest(".chip"); if (!b) return;
+  F.area = b.dataset.area;
+  document.querySelectorAll("#areas .chip").forEach(x => x.setAttribute("aria-pressed", x === b));
+  renderCourses();
+});
+const about = document.getElementById("about");
+about.value = S.about;
+about.addEventListener("input", () => { S.about = about.value; save(); refresh(); });
+document.querySelector(".tabs").addEventListener("click", e => {
+  const b = e.target.closest("button[data-tab]"); if (!b) return;
+  tab = b.dataset.tab;
+  document.querySelectorAll(".tabs button").forEach(x => x.setAttribute("aria-selected", x === b));
+  renderOut();
+});
+const toast = msg => { const t = document.getElementById("toast"); t.textContent = msg; setTimeout(() => { if (t.textContent === msg) t.textContent = ""; }, 2500); };
+document.getElementById("copy").addEventListener("click", () => {
+  const out = document.getElementById("out");
+  renderOut();
+  const fallback = () => { out.focus(); out.select(); toast("Selected. Press Ctrl+C / ⌘C to copy."); };
+  try { navigator.clipboard.writeText(out.value).then(() => toast("Copied"), fallback); } catch (e) { fallback(); }
+});
+// Downloads only work when the page is opened as a local file, not inside the artifact viewer.
+const dl = document.getElementById("dl");
+let framed = true; try { framed = window.self !== window.top; } catch (e) {}
+dl.hidden = framed;
+dl.addEventListener("click", () => {
+  renderOut();
+  const name = { md: "my-background.md", rag: "learner-profile.json", backup: "course-map-backup.json" }[tab];
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([document.getElementById("out").value], { type: "text/plain" }));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+function restore(text) {
+  try {
+    const data = JSON.parse(text);
+    if (!data || typeof data !== "object" || !data.status) throw new Error();
+    S = Object.assign(blank(), data); save();
+    about.value = S.about; renderCourses(); refresh(); renderOut(); toast("Restored");
+  } catch (e) { toast("That is not a Course Map backup. Copy it from the Backup tab."); }
+}
+document.getElementById("restoreBtn").addEventListener("click", () => restore(document.getElementById("restoreIn").value));
+document.getElementById("restoreFile").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader(); r.onload = () => restore(r.result); r.readAsText(f);
+});
+document.getElementById("resetBtn").addEventListener("click", () => { document.getElementById("resetYes").hidden = false; });
+document.getElementById("resetYes").addEventListener("click", e => {
+  S = blank(); save(); e.target.hidden = true; about.value = ""; renderCourses(); refresh(); renderOut(); toast("Cleared");
+});
+
+// Open the first course so the page shows how it works.
+open.add(COURSES.find(c => !isRemoved(c)).id);
+renderCourses(); renderStats(); renderOut();
+</script>
+
+</body>
+</html>

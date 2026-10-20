@@ -80,3 +80,15 @@ See:
 - `docs/evaluation.md`
 - `docs/system_design.md`
 - `docs/roadmap.md`
+
+## Course Map (learner profile)
+
+`tools/course-map/index.html` is a standalone page (no backend, no API key) for marking every topic from my transcripts as *Know it*, *Not sure* or *Not taken*. Unsure or uncovered topics show a short explanation and an "I understand the basics now" checkbox. Redundant courses can be removed, and general-education courses start out removed.
+
+Open the file in a browser. Answers are saved in the browser. The side panel produces:
+
+- a Markdown profile to paste into any AI chat,
+- a JSON source to paste into this agent's manual source box (format `json`),
+- a backup you can restore later.
+
+Grades and GPA are left empty in the repo copy; fill `GRADES` and `GPA` at the top of the script locally if you want them in the profile.
