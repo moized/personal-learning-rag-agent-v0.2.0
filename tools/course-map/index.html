@@ -131,6 +131,24 @@ button { cursor: pointer; }
 .toast { color: var(--known); font-size: 0.84rem; }
 .legend { display: grid; gap: 4px; font-size: 0.84rem; color: var(--muted); }
 .legend b { color: var(--ink); font-weight: 600; }
+.qbtn { border: 1px solid var(--line); background: var(--surface); color: var(--accent); border-radius: 6px; padding: 5px 9px; font-size: 0.8rem; }
+.qbtn[aria-expanded=true] { background: var(--accent-soft); border-color: var(--accent); }
+.qbadge { font-size: 0.72rem; color: var(--reviewed); background: var(--reviewed-soft); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+.quiz { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--accent-soft); border-left: 3px solid var(--accent); border-radius: 6px; display: grid; gap: 8px; }
+.qq { font-weight: 500; }
+.qopts { display: grid; gap: 6px; }
+.qopt { text-align: left; border: 1px solid var(--line); background: var(--bg); border-radius: 6px; padding: 7px 10px; font-size: 0.9rem; }
+.qopt:hover { border-color: var(--accent); }
+.qopt.right { background: var(--known-soft); border-color: var(--known); color: var(--known); font-weight: 600; }
+.qopt.wrong { background: var(--unsure-soft); border-color: var(--unsure); color: var(--unsure); }
+.qfb { font-size: 0.88rem; }
+.qfb.ok b { color: var(--known); }
+.qfb.no b { color: var(--unsure); }
+.certform { background: var(--surface); border: 1px dashed var(--accent); border-radius: var(--r); padding: 14px; display: grid; gap: 12px; }
+.certgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.certgrid label { display: grid; gap: 4px; font-size: 0.8rem; color: var(--muted); min-width: 0; }
+.certgrid .wide { grid-column: 1 / -1; }
+.certgrid input, .certgrid select { padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 0.92rem; min-width: 0; }
 @media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
 </style>
 
@@ -153,6 +171,7 @@ button { cursor: pointer; }
       <option value="">Both degrees</option>
       <option value="BSc">BSc · Physics Engineering</option>
       <option value="MSc">MSc · Data Science</option>
+      <option value="Cert">Certificates only</option>
     </select>
     <div class="chips" id="areas" role="group" aria-label="Filter by area"></div>
     <label class="check"><input type="checkbox" id="todo"> Only courses with unmarked topics</label>
@@ -607,20 +626,342 @@ C("VBL5160","VBL5160","Introduction to Big Data","2026 Spring","MSc","Data & AI"
  "NoSQL databases|Key-value, document, column and graph stores.",
  "Batch vs stream processing|Processing stored data vs data as it arrives."])
 ];
-const TERMS = [...new Set(COURSES.map(c => c.term))];
-const byId = Object.fromEntries(COURSES.map(c => [c.id, c]));
+// One quiz question per topic, same order as the topics: "Question|correct answer|wrong|wrong"
+const QUIZ = {
+FIZ103:["A ball is thrown horizontally off a cliff. With no air resistance, its horizontal velocity…|stays constant|increases steadily|drops to zero at landing",
+ "A 2 kg box accelerates at 3 m/s². What is the net force on it?|6 N|1.5 N|5 N",
+ "A ball is dropped from rest with no air resistance. As it falls…|potential energy turns into kinetic energy and the total stays the same|both kinetic and potential energy increase|the total energy decreases",
+ "In a perfectly inelastic collision…|momentum is conserved but some kinetic energy is lost|kinetic energy is conserved but momentum is not|neither is conserved",
+ "A spinning skater pulls in their arms and spins faster because…|angular momentum is conserved while the moment of inertia drops|the arms apply an extra torque|kinetic energy is conserved",
+ "Making a simple pendulum 4 times longer multiplies its period by…|2|4|16"],
+FIZ103L:["A length written as 12.30 cm has how many significant figures?|4|3|2",
+ "Adding two measurements with independent uncertainties, the combined uncertainty is usually…|the square root of the sum of the squared uncertainties|the product of the uncertainties|the smaller uncertainty",
+ "You plot fall distance against time² for free fall. The slope equals…|g/2|g|2g",
+ "On a frictionless incline at angle θ, the acceleration along the slope is…|g·sinθ|g·cosθ|g",
+ "In a collision experiment, what should be the same before and after?|Total momentum|Each cart's velocity|Each cart's kinetic energy",
+ "Which part of a lab report compares results with theory and discusses errors?|Discussion and conclusion|Aim|Equipment list"],
+KIM101:["Which element an atom is depends on its number of…|protons|neutrons|outer electrons",
+ "Across a period from left to right, atomic radius generally…|decreases|increases|stays the same",
+ "Table salt (NaCl) is held together mainly by…|ionic bonds|covalent bonds|metallic bonds",
+ "How many moles are in 36 g of water (M = 18 g/mol)?|2|0.5|18",
+ "At constant temperature, halving a gas's volume makes its pressure…|double|halve|stay the same",
+ "A reaction with negative ΔH is…|exothermic (releases heat)|endothermic (absorbs heat)|never spontaneous"],
+KIM101L:["Which glassware delivers one precise, fixed volume?|Volumetric pipette|Beaker|Erlenmeyer flask",
+ "The endpoint of an acid–base titration is usually seen as…|a color change of the indicator|a precipitate forming|gas bubbles",
+ "To make 100 mL of 0.1 M solution from 1 M stock, take…|10 mL of stock and dilute to 100 mL|1 mL of stock|100 mL of stock",
+ "Separating liquids by their boiling points is called…|distillation|filtration|decantation"],
+MAT101:["What is the domain of f(x) = ln(x)?|x > 0|all real x|x ≥ 0",
+ "lim (x→0) sin(x)/x equals…|1|0|it does not exist",
+ "The derivative of x³ is…|3x²|x²|3x³",
+ "At a local maximum of a smooth function, the first derivative is…|zero|positive|negative",
+ "∫₀¹ 2x dx equals…|1|2|0.5",
+ "∫ x·eˣ dx is best solved with…|integration by parts|partial fractions|trigonometric substitution"],
+MDB101:["Designing a bridge is mainly the job of a…|civil engineer|chemical engineer|software engineer",
+ "What comes first in the engineering design process?|Defining the problem and requirements|Building a prototype|Mass production",
+ "A quick order-of-magnitude estimate is useful because it…|checks whether a detailed answer is reasonable|replaces detailed calculation|is always exact",
+ "You find a safety flaw that the client wants to ignore. Engineering ethics says to…|put public safety first and report it|stay silent to keep the client|fix it secretly"],
+MDB103:["Which of these is an operating system?|Linux|Excel|Chrome",
+ "Slides for a talk are usually made in…|PowerPoint|Excel|Notepad",
+ "In a spreadsheet, =AVERAGE(A1:A10) returns…|the mean of A1 to A10|the sum of A1 to A10|the number of cells",
+ "A phishing email tries to…|trick you into giving passwords or personal data|speed up your computer|back up your files"],
+FIZ104:["If the distance between two charges doubles, the force between them…|becomes 1/4 as large|halves|doubles",
+ "The electric flux through a closed surface with no charge inside is…|zero|ε₀|infinite",
+ "A parallel-plate capacitor's capacitance increases when the plates are…|moved closer together|moved farther apart|made smaller",
+ "Two 10 Ω resistors in series have a total resistance of…|20 Ω|5 Ω|10 Ω",
+ "A magnetic field does no work on a moving charge because its force is…|perpendicular to the velocity|parallel to the velocity|zero",
+ "Lenz's law says the induced current…|opposes the change in flux that caused it|adds to the change in flux|is always zero"],
+FIZ104L:["To measure current, an ammeter is connected…|in series|in parallel|across the battery only",
+ "An oscilloscope mainly shows…|voltage over time|resistance|magnetic field direction",
+ "After one time constant RC, a charging capacitor reaches about…|63% of its final voltage|50%|100%",
+ "Pushing a magnet into a coil faster makes the induced voltage…|larger|smaller|unchanged"],
+FIZ114:["Which data type stores True or False?|Boolean|Integer|String",
+ "A loop that repeats as long as a condition is true is a…|while loop|if statement|function",
+ "Why write functions?|To reuse code and organize it into named pieces|To make code run on a GPU|To avoid using variables",
+ "In most languages, the first element of an array is at index…|0|1|-1",
+ "A flowchart is used to…|plan the steps of an algorithm|compile code|store data",
+ "A program runs but gives the wrong answer. This is a…|logic error|syntax error|compiler crash"],
+KIM102:["Higher temperature usually speeds up a reaction because…|more molecules have energy above the activation energy|the activation energy rises|the equilibrium constant becomes zero",
+ "Adding more reactant to a system at equilibrium shifts it…|toward products|toward reactants|nowhere",
+ "A solution with pH 3 is…|acidic|basic|neutral",
+ "A precipitate forms when the ion product…|exceeds Ksp|is below Ksp|is zero",
+ "In a galvanic cell, oxidation happens at the…|anode|cathode|salt bridge",
+ "A reaction is spontaneous when ΔG is…|negative|positive|exactly zero"],
+KIM102L:["A buffer is made of…|a weak acid and its conjugate base|a strong acid and a strong base|pure water",
+ "If doubling a reactant's concentration doubles the rate, the reaction is ___ order in it.|first|zero|second",
+ "A galvanic cell's voltage comes from…|the difference between the electrode potentials|the size of the beaker|the salt bridge's color",
+ "A deep blue color after adding ammonia usually means…|copper(II) ions|sodium ions|chloride ions"],
+MAT102:["∫₁^∞ 1/x² dx equals…|1|∞|0",
+ "The harmonic series Σ 1/n…|diverges|converges to 1|converges to 2",
+ "The Taylor series of eˣ around 0 is…|1 + x + x²/2! + x³/3! + …|1 − x + x² − x³ + …|x − x³/3! + x⁵/5! − …",
+ "For f(x, y) = x²y, ∂f/∂x is…|2xy|x²|2x",
+ "The double integral of 1 over a region gives…|the area of the region|zero|the perimeter",
+ "A vector field with zero curl on a simply connected region is…|conservative (the gradient of a potential)|always zero|divergence-free"],
+FIZ203:["A clock moving fast relative to you appears to…|run slow|run fast|stop",
+ "The energy of a photon with frequency f is…|hf|hf²|h/f",
+ "In the photoelectric effect, brighter light of the same frequency increases…|the number of emitted electrons|the maximum electron energy|the threshold frequency",
+ "The de Broglie wavelength of a particle is…|h/p|p/h|hp",
+ "The Bohr model explains hydrogen's spectral lines by…|electrons jumping between fixed energy levels|electrons spiraling into the nucleus|orbits of any energy",
+ "If a particle's position is known very precisely, its momentum is…|very uncertain|also precise|zero"],
+FIZ205:["A dislocation is a…|line defect in a crystal|missing atom|grain boundary",
+ "The stress where permanent deformation starts is the…|yield strength|ultimate tensile strength|elastic modulus",
+ "A phase diagram shows…|which phases are stable at each temperature and composition|every element's crystal structure|how fast diffusion is",
+ "Diffusion in solids gets faster when temperature…|rises|falls|stays the same",
+ "Which class of materials is usually brittle and heat-resistant?|Ceramics|Metals|Polymers",
+ "Metals conduct electricity well because they have…|free, delocalized electrons|a large band gap|ionic bonds"],
+FIZ206:["If Av = λv for a nonzero vector v, then λ is…|an eigenvalue of A|the determinant of A|the trace of A",
+ "e^(iπ) equals…|−1|1|i",
+ "In spherical coordinates, the angle measured from the z-axis is usually…|θ (polar angle)|φ (azimuth)|r",
+ "A Fourier series writes a periodic function as…|a sum of sines and cosines|one polynomial|one exponential",
+ "The Frobenius method is used when an ODE has…|a regular singular point|only constant coefficients|no solution",
+ "Legendre polynomials appear when solving Laplace's equation in…|spherical coordinates|Cartesian coordinates|one dimension"],
+FIZ207:["One nanometer is…|10⁻⁹ m|10⁻⁶ m|10⁻¹² m",
+ "Building structures atom by atom or by self-assembly is…|bottom-up fabrication|top-down fabrication|lithography",
+ "Which microscope scans a sharp tip over a surface?|AFM|TEM|Optical microscope",
+ "Graphene is…|one layer of carbon atoms in a hexagonal lattice|a silicon nanowire|a metal oxide",
+ "Nanoparticles make good catalysts mainly because they have…|a very high surface-to-volume ratio|very little surface|no surface atoms"],
+FIZ209:["Light going from air into glass bends…|toward the normal|away from the normal|not at all",
+ "In a refracting telescope, the objective lens…|collects light and forms an image|only magnifies the final image|polarizes light",
+ "In a double slit, bright fringes appear where the path difference is…|a whole number of wavelengths|half a wavelength|always zero",
+ "Diffraction is strongest when the slit width is…|close to the wavelength|much larger than the wavelength|zero",
+ "Unpolarized light passing one ideal polarizer keeps…|half its intensity|all its intensity|none of it",
+ "Laser light comes from…|stimulated emission|thermal radiation|reflection"],
+MAT201:["dy/dx = ky has the solution…|y = Ce^(kx)|y = kx + C|y = C·sin(kx)",
+ "The solutions of y'' + y = 0 are…|sin x and cos x|eˣ and e⁻ˣ|1 and x",
+ "For y'' + y = eˣ, a good guess for the particular solution is…|Aeˣ|A·sin x|Ax²",
+ "The Laplace transform of f'(t) is…|sF(s) − f(0)|F(s)/s|F'(s)",
+ "For x' = Ax, the behavior of the solution is set by…|the eigenvalues of A|only the trace of A|the starting time",
+ "Series solutions are mostly used for ODEs with…|variable coefficients|constant coefficients|no derivatives"],
+FIZ114M:["In MATLAB, a semicolon at the end of a line…|hides the output|ends the program|starts a comment",
+ "A .* B in MATLAB means…|element-wise multiplication|matrix multiplication|division",
+ "Which command draws a 2D line plot?|plot|disp|figure",
+ "A MATLAB function file should…|have the same name as the function|start with a semicolon|use only global variables",
+ "ode45 is used to…|solve ordinary differential equations numerically|invert matrices|draw 3D surfaces",
+ "readtable is used to…|load table data from a file|plot a table|delete a file"],
+FIZ201:["Storing numbers with limited precision causes…|round-off error|truncation error|syntax error",
+ "Newton–Raphson updates x to…|x − f(x)/f'(x)|x + f(x)|x/2",
+ "LU decomposition writes a matrix as…|a lower times an upper triangular matrix|two diagonal matrices|its inverse",
+ "Least squares fitting minimizes…|the sum of squared residuals|the largest residual|the number of points",
+ "Simpson's rule approximates the function on each pair of intervals with a…|parabola|straight line|constant",
+ "Fourth-order Runge–Kutta beats Euler's method because it…|averages several slope estimates per step|uses no step size|is exact"],
+FIZ202:["Adding phosphorus to silicon makes it…|n-type|p-type|an insulator",
+ "A forward-biased diode…|conducts current|blocks current|stores charge",
+ "In a BJT, a small base current controls…|a larger collector current|the supply voltage|the base resistor",
+ "A MOSFET is controlled by…|the gate voltage|the base current|the collector current",
+ "Biasing sets a transistor's…|DC operating point (Q-point)|frequency|color code",
+ "An ideal op-amp with negative feedback keeps…|its two inputs at the same voltage|infinite output current|zero gain"],
+FIZ204:["|ψ(x)|² gives…|the probability density of finding the particle at x|the particle's energy|its momentum",
+ "The time-independent Schrödinger equation is…|Hψ = Eψ|F = ma|E = mc²",
+ "A particle in an infinite well has energy levels that…|are discrete and grow as n²|are continuous|are all zero",
+ "The ground-state energy of the quantum harmonic oscillator is…|ħω/2|0|ħω",
+ "A single measurement of an observable always gives…|one of the operator's eigenvalues|the expectation value|zero",
+ "An electron's spin quantum number is…|1/2|1|0"],
+FIZ252:["A half-wave rectifier passes…|only one half of each AC cycle|both halves|only DC",
+ "A common-emitter amplifier's output is…|inverted compared with the input|in phase with the input|always zero",
+ "An inverting amplifier with Rf = 10 kΩ and Rin = 1 kΩ has a gain of…|−10|10|−1",
+ "On a breadboard, the holes in one short strip are…|connected to each other|isolated|grounded"],
+MDB202:["A closed system can exchange…|energy but not mass|mass but not energy|neither",
+ "For a closed system, Q − W equals…|the change in internal energy|zero|the enthalpy",
+ "A saturated liquid–vapor mixture is described by its…|quality (vapor mass fraction)|density only|color",
+ "In any real process, the entropy of the universe…|increases|decreases|stays exactly the same",
+ "The Carnot efficiency between 600 K and 300 K is…|50%|100%|25%",
+ "Steam power plants are modeled with the…|Rankine cycle|Otto cycle|Diesel cycle"],
+BYM310:["A biocompatible material…|does its job without causing a harmful body response|never touches the body|dissolves instantly",
+ "Which metal is common in hip implants?|Titanium alloys|Lead|Pure copper",
+ "When an implant enters the body, the first thing at its surface is…|protein adsorption|bone growth|infection",
+ "A coronary stent is used to…|keep a blood vessel open|replace a bone|filter blood"],
+FIZ301:["In a rotating frame, a moving object feels a sideways…|Coriolis force|Lorentz force|friction force",
+ "The Lagrangian is…|T − V|T + V|V − T",
+ "Hamilton's equations are written in terms of…|generalized coordinates and momenta|forces only|velocities only",
+ "Under a central force, which quantity is conserved?|Angular momentum|Linear momentum|Velocity",
+ "In a normal mode…|every part oscillates at the same frequency|parts move randomly|nothing moves",
+ "The inertia tensor links…|angular velocity to angular momentum|force to acceleration|mass to volume"],
+FIZ305:["Fully constrained sketches are preferred because…|the geometry cannot change by accident|they render faster|the files are smaller",
+ "Spinning a 2D profile around an axis to make a solid is a…|revolve|extrude|fillet",
+ "In an assembly, mates define…|how parts are positioned relative to each other|the material|the color",
+ "A drawing generated from a 3D model updates when…|the model changes|you print it|never"],
+FIZ351:["In the photoelectric experiment, the slope of stopping voltage against frequency is…|h/e|e/h|the work function",
+ "In the e/m experiment, electrons move in circles because of…|a magnetic force perpendicular to their velocity|gravity|electric repulsion",
+ "The current dips in the Franck–Hertz experiment show that atoms…|absorb energy only in fixed amounts|absorb any amount of energy|have no electrons",
+ "Each element's emission lines are…|unique to that element|the same for every gas|continuous",
+ "Rings in electron diffraction show that electrons…|behave like waves|have no mass|are photons"],
+FIZ353:["Bragg's law is…|nλ = 2d·sinθ|λ = h/p|E = hf",
+ "The sign of the Hall voltage tells you…|whether the carriers are electrons or holes|the temperature|only the resistance",
+ "A Geiger counter detects radiation by…|ionizing a gas|measuring heat|reflecting light",
+ "A reduced chi-square close to 1 means…|the fit matches the data within its uncertainties|the fit is wrong|the data has no errors"],
+FIZ369:["Which radiation is stopped by a sheet of paper?|Alpha|Gamma|Neutrons",
+ "After two half-lives, the fraction of nuclei left is…|1/4|1/2|0",
+ "Above 1.022 MeV, which photon interaction becomes possible?|Pair production|Only the photoelectric effect|Only Rayleigh scattering",
+ "A scintillation detector turns radiation into…|flashes of light|heat|sound",
+ "The sievert (Sv) measures…|equivalent dose, weighted for biological effect|activity|one photon's energy",
+ "Doubling your distance from a point source cuts the dose rate to…|1/4|1/2|the same"],
+FIZ302:["The method of images replaces a grounded conductor with…|imaginary charges that meet the same boundary conditions|a dielectric|a current loop",
+ "Far from a neutral charge distribution, the leading term is usually the…|dipole term|monopole term|zero",
+ "A dielectric between capacitor plates…|lowers the field and raises the capacitance|raises the field|removes charge",
+ "The magnetic field is the curl of the…|vector potential A|scalar potential V|electric field",
+ "∇·B = 0 means…|there are no magnetic monopoles|B is constant|E is zero",
+ "The Poynting vector gives…|the energy flow of an electromagnetic wave|the charge density|the wave's frequency"],
+FIZ304:["The reciprocal lattice is mainly used to describe…|diffraction and wave vectors|bond lengths only|nuclear spin",
+ "Bragg diffraction peaks occur when…|waves scattered from crystal planes add in phase|atoms are disordered|the beam is polarized",
+ "Phonons are…|quantized lattice vibrations|electrons|photons in vacuum",
+ "At absolute zero, the highest filled electron energy in a metal is the…|Fermi energy|band gap|work function",
+ "An insulator has…|a large band gap and a full valence band|no band gap|partly filled bands",
+ "Doping silicon with boron makes it…|p-type (extra holes)|n-type|a metal"],
+FIZ354:["The Zeeman effect is spectral lines splitting in…|a magnetic field|an electric field|high temperature",
+ "A spectrometer's resolution tells you…|how close two lines can be and still be told apart|how bright the source is|only the wavelength range",
+ "Repeating a measurement many times reduces…|random error|systematic error|the true value",
+ "Error bars on a plot show…|the uncertainty of each point|the fit line|the axis range"],
+INS102:["Hidden edges are drawn with…|dashed lines|thick solid lines|chain lines",
+ "Orthographic projection shows an object as…|separate 2D views (front, top, side)|one perspective view|a photo",
+ "A section view shows…|the inside of an object as if it were cut|only the outline|the assembly order",
+ "In AutoCAD, layers are used to…|organize drawing elements by type|change the file format|add 3D materials"],
+IST182:["Which measure is least affected by outliers?|Median|Mean|Range",
+ "A 95% confidence interval means…|the method captures the true value in 95% of repeated samples|95% of the data lies inside it|the sample mean is 95% correct",
+ "A small p-value such as 0.01 suggests…|the data is unlikely if the null hypothesis were true|the null hypothesis is true|the effect is large",
+ "A correlation of −0.9 means…|a strong negative linear relationship|no relationship|a weak positive relationship",
+ "Which tool is commonly used for statistics?|R|Paint|AutoCAD"],
+MAT218:["The number of successes in n independent yes/no trials follows a…|binomial distribution|uniform distribution|exponential distribution",
+ "The Central Limit Theorem says the sample mean is approximately…|normally distributed for large samples|always uniform|equal to the median",
+ "Maximum likelihood estimation picks parameters that…|make the observed data most probable|minimize the sample size|are always zero",
+ "Rejecting a null hypothesis that is actually true is a…|type I error|type II error|power",
+ "In a least-squares line y = a + bx, b is the…|slope|intercept|residual"],
+MDB306:["An abstract should…|briefly summarize purpose, method and main results|list all references|contain raw data",
+ "Good technical writing is…|clear, precise and objective|emotional|deliberately vague",
+ "Using someone's idea without citing it is…|plagiarism|paraphrasing|summarizing",
+ "A good slide usually has…|one main message and little text|full paragraphs|many different fonts"],
+EEM341:["Reluctance in a magnetic circuit plays the role of ___ in an electric circuit.|resistance|voltage|current",
+ "A transformer with 100 primary and 10 secondary turns, fed 230 V, gives about…|23 V|2300 V|230 V",
+ "Electromechanical devices produce force by…|changing stored magnetic energy with position|chemical reactions|static electricity",
+ "In a DC motor, the commutator…|reverses the armature current to keep torque in one direction|stores energy|cools the motor",
+ "An induction motor's rotor turns ___ synchronous speed.|slightly slower than|exactly at|much faster than",
+ "A synchronous machine's rotor turns…|at exactly synchronous speed|with slip|at random speed"],
+FIZ401:["In S = k ln Ω, Ω is…|the number of microstates|the temperature|the volume",
+ "The canonical ensemble describes a system at fixed…|temperature|energy|velocity",
+ "The Helmholtz free energy is F = …|−kT ln Z|kT·Z|Z/kT",
+ "In Maxwell–Boltzmann statistics, a state with energy E has probability proportional to…|e^(−E/kT)|E/kT|e^(E/kT)",
+ "Electrons obey…|Fermi–Dirac statistics|Bose–Einstein statistics|exact Maxwell–Boltzmann statistics",
+ "At high temperature a solid's molar heat capacity approaches 3R. This is the…|Dulong–Petit law|Stefan–Boltzmann law|Wien law"],
+FIZ451:["A literature review helps you…|learn what has been done and find the gap|skip the method|avoid citations",
+ "A good research question is…|specific and answerable within the scope|as broad as possible|free of measurable goals",
+ "The choice of method should follow…|the research question and the data or tools available|what looks impressive|the thesis page limit"],
+FIZ461:["Which particle carries the electromagnetic force?|Photon|Gluon|W boson",
+ "At the particle scale, the weakest of the four fundamental forces is…|gravity|the weak force|the strong force",
+ "In every observed reaction, ___ is conserved.|electric charge|strangeness|parity",
+ "In a Feynman diagram, internal lines stand for…|virtual (exchanged) particles|detector parts|time only",
+ "A proton is made of…|two up quarks and one down quark|one up and two down quarks|three up quarks",
+ "The LHC is a…|circular proton collider|linear electron accelerator|nuclear reactor"],
+FIZ471:["Surface modelling is useful for…|complex curved shapes such as car bodies|simple boxes only|text documents",
+ "Finite element analysis predicts…|stress and deformation by splitting a part into small elements|the price of a part|its color",
+ "A motion study in CAD checks…|how parts move together and whether they collide|the file size|render quality",
+ "For 3D printing, a model is usually exported as…|STL|DOCX|MP3"],
+MAT105:["How many ways can 3 books be arranged on a shelf?|6|3|9",
+ "Bayes' rule is used to…|update a probability after new evidence|add two probabilities|count outcomes",
+ "The number of calls per hour is often modelled with a…|Poisson distribution|normal distribution|uniform distribution",
+ "In a Poisson process, the waiting time to the next event follows an…|exponential distribution|binomial distribution|geometric distribution",
+ "Var(X) measures…|how spread out X is around its mean|the average of X|the largest value of X"],
+FIZ402:["Nuclear radius grows roughly as…|A^(1/3)|A|A²",
+ "Magic numbers (2, 8, 20, 28, 50…) are explained by the…|shell model|liquid drop model|Bohr model",
+ "In beta-minus decay, a neutron becomes…|a proton, an electron and an antineutrino|an alpha particle|only a photon",
+ "A positive Q-value means a reaction…|releases energy|needs energy|cannot happen",
+ "Fusing light nuclei releases energy because…|binding energy per nucleon rises up to iron|light nuclei are radioactive|mass increases"],
+FIZ452:["The results section should…|present findings clearly before interpreting them|hide unexpected results|repeat the introduction",
+ "A thesis discussion should…|interpret results and compare them with earlier work|only list data|leave out limitations",
+ "In a defense, the best reply to a question you cannot answer is to…|say what you know and how you would check the rest|make something up|change the subject"],
+FIZ462:["A differential amplifier mainly amplifies…|the difference between its two inputs|the sum of its inputs|only DC",
+ "At the −3 dB frequency, the gain has fallen to about…|70.7% of the midband value|50%|10%",
+ "Negative feedback gives up some gain in exchange for…|stability and bandwidth|more noise|more distortion",
+ "An oscillator needs a loop gain of…|1, with 0° (360°) phase shift|zero|less than 0.1",
+ "A low-pass filter…|passes low frequencies and blocks high ones|passes only high frequencies|passes only DC"],
+MAT318:["u_xx + u_yy = 0 is…|elliptic|parabolic|hyperbolic",
+ "The heat equation is…|u_t = k·u_xx|u_tt = c²·u_xx|u_xx + u_yy = 0",
+ "In the wave equation u_tt = c²·u_xx, c is…|the wave speed|the temperature|the damping",
+ "Inside its domain, a solution of Laplace's equation has no…|local maxima or minima|boundary values|derivatives",
+ "Separation of variables assumes u(x, t) = …|X(x)·T(t)|X(x) + T(t)|X(t)/T(x)",
+ "A Dirichlet boundary condition fixes…|the value of u on the boundary|the derivative of u|nothing"],
+MAT320:["An ill-conditioned problem is one where…|small input changes cause large output changes|the answer is zero|there is no solution",
+ "Near a simple root, Newton's method converges…|quadratically|linearly|never",
+ "Gauss–Seidel is guaranteed to converge when the matrix is…|strictly diagonally dominant|singular|all zeros",
+ "Cubic splines are preferred over one high-degree polynomial because they…|avoid wild oscillations (Runge's phenomenon)|need fewer points|are always exact",
+ "Least squares solves an overdetermined system by…|minimizing ‖Ax − b‖²|inverting A directly|dropping extra equations",
+ "Gaussian quadrature chooses…|the best points and weights for high accuracy|evenly spaced points only|random points"],
+MAT419:["The quantity you minimize or maximize is the…|objective function|constraint|decision variable",
+ "The optimum of a linear program is found at…|a corner (vertex) of the feasible region|the center of the region|outside the region",
+ "Gradient descent steps…|opposite to the gradient|along the gradient|in a random direction",
+ "Lagrange multipliers are used for…|equality constraints|problems with no constraints|integer variables only",
+ "For a convex function, any local minimum is…|a global minimum|a maximum|not a minimum",
+ "Genetic algorithms are inspired by…|natural selection|heat flow|electric circuits"],
+BLM5110:["Grouping customers without any labels is…|unsupervised learning|supervised learning|reinforcement learning",
+ "Logistic regression outputs…|a probability between 0 and 1|any real number|a cluster id",
+ "A random forest combines…|many decision trees trained on random samples|many linear models|one very deep tree",
+ "Support vectors are…|the training points closest to the decision boundary|all training points|removed outliers",
+ "In k-means, each point is assigned to…|the nearest cluster center|a random cluster|the largest cluster",
+ "Backpropagation computes…|gradients of the loss with respect to the weights|the final accuracy|the number of layers",
+ "Precision is…|TP / (TP + FP)|TP / (TP + FN)|(TP + TN) / total",
+ "Very low training error with high test error means…|overfitting|underfitting|a well-tuned model",
+ "PCA finds the directions of…|maximum variance|minimum variance|maximum error"],
+FIZ5102:["The deuteron is a bound state of…|a proton and a neutron|two protons|two neutrons",
+ "In the shell model, a closed shell gives a nucleus…|extra stability|zero mass|no spin rules",
+ "Rotational bands appear in nuclei that are…|deformed|spherical|unbound",
+ "In the isospin picture, the proton and neutron are…|two states of one nucleon|two different forces|antiparticles",
+ "Gamma transitions are classified by…|multipolarity (E1, M1, E2…)|mass number|binding energy"],
+FIZ5104:["A Green's function is the response to…|a point source|a uniform field|a closed surface",
+ "Spherical harmonics Y_lm are…|the angular solutions of Laplace's equation|radial functions|Fourier coefficients",
+ "At a dielectric boundary with no free charge, the normal component of ___ is continuous.|D|E|P",
+ "Inside a long ideal solenoid, the magnetic field is…|uniform and along the axis|zero|radial",
+ "The continuity equation expresses…|conservation of charge|conservation of mass|Ohm's law",
+ "A rectangular waveguide cannot carry waves below its…|cutoff frequency|plasma frequency|resonant length"],
+IST5118:["A random walk is…|non-stationary|stationary|white noise",
+ "For an AR(p) process, the PACF…|cuts off after lag p|decays slowly forever|is always zero",
+ "Retail sales that rise every December show…|seasonality|stationarity|white noise",
+ "An MA(1) model uses…|the previous error term|only the previous value|the trend",
+ "The “I” in ARIMA stands for…|integrated (differencing)|independent|interval",
+ "Compared with MAE, RMSE penalizes large errors…|more|less|the same"],
+MTM5131:["SVD writes a matrix as…|UΣVᵀ|LU|QR only",
+ "The gradient of f(x, y) points in the direction of…|steepest increase|steepest decrease|no change",
+ "P(A|B) = P(B|A)·P(A)/P(B) is…|Bayes' rule|the chain rule of calculus|the law of large numbers",
+ "A learning rate that is too large in gradient descent can cause…|divergence or oscillation|guaranteed faster convergence|no change at all",
+ "KL divergence measures…|how one probability distribution differs from another|the distance between two points|variance",
+ "Backpropagation is an application of…|the chain rule|the mean value theorem|integration by parts"],
+VBL5160:["Which of these is NOT one of the classic V's of big data?|Vocabulary|Volume|Velocity",
+ "HDFS stores large files by…|splitting them into blocks copied across several machines|compressing them onto one disk|keeping them only in RAM",
+ "In MapReduce, the reduce step…|combines the values grouped under each key|splits the input|only reads from disk",
+ "Spark is often faster than classic MapReduce because it…|keeps data in memory between steps|uses one machine|avoids parallelism",
+ "MongoDB is a…|document store|graph store|relational database",
+ "Processing data as it arrives is called…|stream processing|batch processing|archiving"]
+};
+const CERT_TERM = "Certificates & online courses";
+const TERMS = [...new Set(COURSES.map(c => c.term)), CERT_TERM];
+let ALL = COURSES, byId = {};
+function sync() {
+  ALL = COURSES.concat((S.certs || []).map(x => ({ id: x.id, code: x.provider, name: x.title, term: CERT_TERM, prog: "Cert", area: x.area, topics: [], cert: x })));
+  byId = Object.fromEntries(ALL.map(c => [c.id, c]));
+}
 const STATUS_LABEL = { known: "Know it", unsure: "Not sure", none: "Not taken" };
 const TIME_LABEL = { "": "Time spent: not set", light: "Light", moderate: "Moderate", heavy: "Heavy", focus: "Main focus" };
 
 // ---------- State ----------
 const KEY = "courseMap.v1";
-const blank = () => ({ status: {}, understood: {}, hiddenTopics: {}, removed: {}, custom: {}, time: {}, notes: {}, about: "" });
+const blank = () => ({ status: {}, understood: {}, hiddenTopics: {}, removed: {}, custom: {}, time: {}, notes: {}, about: "", quiz: {}, certs: [] });
 let S = blank();
 try { const raw = localStorage.getItem(KEY); if (raw) S = Object.assign(blank(), JSON.parse(raw)); } catch (e) {}
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} };
+sync();
 
-const isRemoved = c => (c.id in S.removed) ? S.removed[c.id] : !!c.gen;
+const isRemoved = c => c.cert ? false : (c.id in S.removed) ? S.removed[c.id] : !!c.gen;
 const split = s => { const i = s.indexOf("|"); return [s.slice(0, i), s.slice(i + 1)]; };
+function quizOf(tid) {
+  const [cid, i] = tid.split(":");
+  const raw = (QUIZ[cid] || [])[+i];
+  if (!raw) return null;
+  // The question itself may contain "|" (e.g. |ψ|²); answers never do, so split from the right.
+  const parts = raw.split("|");
+  const opts = parts.splice(-3);
+  return { q: parts.join("|"), answer: opts[0], opts };
+}
+// Stable shuffle per topic so options don't jump around between renders.
+function shuffled(arr, seed) {
+  let h = 0; for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return arr.map((v, i) => [((h ^ (i * 2654435761)) >>> 0) % 997, v]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
+}
 function topicsOf(c) {
   const base = c.topics.map((s, i) => { const [name, expl] = split(s); return { tid: c.id + ":" + i, name, expl }; })
     .filter(t => !S.hiddenTopics[t.tid]);
@@ -664,24 +1005,44 @@ function visible(c) {
 }
 
 // ---------- Rendering ----------
-const open = new Set();
+const open = new Set(), qopen = new Set(), picked = {};
+function quizHTML(t) {
+  const qz = quizOf(t.tid);
+  if (!qz || !qopen.has(t.tid)) return "";
+  const pick = picked[t.tid];
+  const opts = shuffled(qz.opts, t.tid).map(o => {
+    const cls = pick === undefined ? "" : o === qz.answer && pick === o ? " right" : o === pick ? " wrong" : "";
+    return `<button class="qopt${cls}" data-act="answer" data-tid="${t.tid}" data-o="${esc(o)}">${esc(o)}</button>`;
+  }).join("");
+  let fb = "";
+  if (pick !== undefined) {
+    fb = pick === qz.answer
+      ? `<div class="qfb ok"><b>Correct.</b> ${esc(t.expl)}</div>`
+      : `<div class="qfb no"><b>Not quite.</b> The answer is “${esc(qz.answer)}”. ${esc(t.expl)} <button class="linkbtn" data-act="retry" data-tid="${t.tid}">Try again</button></div>`;
+  }
+  return `<div class="quiz"><div class="qq">${esc(qz.q)}</div><div class="qopts">${opts}</div>${fb}</div>`;
+}
 function topicHTML(t) {
   const s = S.status[t.tid] || "";
   const ok = !!S.understood[t.tid];
   const btns = ["known", "unsure", "none"].map(v => `<button data-act="status" data-tid="${t.tid}" data-v="${v}" aria-pressed="${s === v}">${STATUS_LABEL[v]}</button>`).join("");
+  const hasQuiz = !!quizOf(t.tid);
   let extra = "";
   if (s === "unsure" || s === "none") {
     extra = `<div class="explain${ok ? " ok" : ""}">
       ${t.expl ? `<div>${esc(t.expl)}</div>` : `<div>Your own topic. Look it up, then tick the box once the basics make sense.</div>`}
       <label><input type="checkbox" data-act="understood" data-tid="${t.tid}" ${ok ? "checked" : ""}> I understand the basics now</label>
+      ${hasQuiz && !ok && !qopen.has(t.tid) ? `<div><button class="linkbtn" data-act="quiz" data-tid="${t.tid}">Check yourself with one question</button></div>` : ""}
     </div>`;
   }
+  const badge = S.quiz[t.tid] === "pass" ? `<span class="qbadge" title="You answered this topic's quiz question correctly">quiz ✓</span>` : "";
   return `<div class="topic" data-tid="${t.tid}">
     <div class="trow">
-      <span class="tname">${esc(t.name)}</span>
+      <span class="tname">${esc(t.name)} ${badge}</span>
+      ${hasQuiz ? `<button class="qbtn" data-act="quiz" data-tid="${t.tid}" aria-expanded="${qopen.has(t.tid)}">Quiz</button>` : ""}
       <span class="seg" role="group" aria-label="${esc(t.name)}">${btns}</span>
       <button class="x" data-act="${t.custom ? "delCustom" : "hideTopic"}" data-tid="${t.tid}" title="${t.custom ? "Delete this topic" : "This topic was not part of my course"}" aria-label="Remove topic">×</button>
-    </div>${extra}
+    </div>${extra}${quizHTML(t)}
   </div>`;
 }
 function courseHTML(c) {
@@ -708,14 +1069,35 @@ function courseHTML(c) {
       </div>
       <div class="cfoot">
         <button class="btn" data-act="allKnown" data-cid="${c.id}">Mark all as Know it</button>
-        <button class="btn warn" data-act="remove" data-cid="${c.id}">Remove course</button>
+        ${c.cert
+          ? (delArm === c.id
+            ? `<button class="btn warn" data-act="delCert" data-cid="${c.id}">Yes, delete this certificate</button><button class="linkbtn" data-act="cancelDel" data-cid="${c.id}">Cancel</button>`
+            : `<button class="btn warn" data-act="armDel" data-cid="${c.id}">Delete certificate</button>`)
+          : `<button class="btn warn" data-act="remove" data-cid="${c.id}">Remove course</button>`}
       </div>
     </div>
   </details>`;
 }
+let delArm = null;
+function certFormHTML() {
+  return `<form class="certform" id="certform">
+    <div class="certgrid">
+      <label>Certificate or course title<input type="text" id="cert-title" required placeholder="e.g. Deep Learning Specialization"></label>
+      <label>Provider<input type="text" id="cert-provider" required placeholder="e.g. Coursera / DeepLearning.AI"></label>
+      <label>Year<input type="text" id="cert-year" inputmode="numeric" placeholder="e.g. 2025"></label>
+      <label>Area<select id="cert-area">${AREAS.filter(a => a !== "General education").map(a => `<option ${a === "Data & AI" ? "selected" : ""}>${a}</option>`).join("")}<option>Other</option></select></label>
+      <label class="wide">Topics it covered, separated by commas<input type="text" id="cert-topics" placeholder="e.g. CNNs, RNNs, transformers, hyperparameter tuning"></label>
+    </div>
+    <div class="row"><button class="btn primary" type="submit">Add certificate</button><span class="lbl" style="text-transform:none;letter-spacing:0">You can mark its topics right after adding it.</span></div>
+  </form>`;
+}
 function renderCourses() {
   const html = TERMS.map(term => {
-    const list = COURSES.filter(c => c.term === term && visible(c));
+    const list = ALL.filter(c => c.term === term && visible(c));
+    if (term === CERT_TERM) {
+      if (F.prog && F.prog !== "Cert") return "";
+      return `<section class="term" id="certs"><div class="term-head"><h2>${esc(term)}</h2><span>${S.certs.length} added</span></div>${list.map(courseHTML).join("")}${certFormHTML()}</section>`;
+    }
     if (!list.length) return "";
     const prog = list[0].prog;
     return `<section class="term"><div class="term-head"><h2>${esc(term)}</h2><span>${prog} · ${list.length} course${list.length > 1 ? "s" : ""}</span></div>${list.map(courseHTML).join("")}</section>`;
@@ -728,7 +1110,7 @@ function rerenderCourse(cid) {
   if (el) el.outerHTML = courseHTML(byId[cid]);
 }
 function renderRemoved() {
-  const list = COURSES.filter(isRemoved);
+  const list = ALL.filter(isRemoved);
   const box = document.getElementById("removed");
   box.hidden = !list.length;
   const wasOpen = box.open;
@@ -738,35 +1120,38 @@ function renderRemoved() {
   box.open = wasOpen;
 }
 function renderStats() {
-  const all = COURSES.filter(c => !isRemoved(c)).flatMap(topicsOf);
+  const all = ALL.filter(c => !isRemoved(c)).flatMap(topicsOf);
   const t = tally(all);
   const n = COURSES.filter(c => !isRemoved(c)).length;
+  const passed = all.filter(x => S.quiz[x.tid] === "pass").length;
   const stat = (v, label, col) => `<div class="stat">${col ? `<span class="dot" style="background:${col}"></span>` : ""}<b>${v}</b><span>${label}</span></div>`;
   document.getElementById("stats").innerHTML =
-    stat(n, "courses") + stat(t.known, "know it", "var(--known)") + stat(t.reviewed, "learned the basics", "var(--reviewed)") +
-    stat(t.unsure, "not sure", "var(--unsure)") + stat(t.none, "not taken", "var(--none)") + stat(t.open, "left to mark", "var(--sunk)");
+    stat(n, "courses") + stat(S.certs.length, "certificates") + stat(t.known, "know it", "var(--known)") + stat(t.reviewed, "learned the basics", "var(--reviewed)") +
+    stat(t.unsure, "not sure", "var(--unsure)") + stat(t.none, "not taken", "var(--none)") + stat(t.open, "left to mark", "var(--sunk)") + stat(passed, "quizzes passed");
   document.getElementById("bar").innerHTML = segs(t);
 }
 
 // ---------- Output ----------
 function groupLines(filterFn) {
   const out = {};
-  for (const c of COURSES) {
+  for (const c of ALL) {
     if (isRemoved(c)) continue;
-    const names = topicsOf(c).filter(filterFn).map(t => t.name);
+    const names = topicsOf(c).filter(filterFn).map(t => t.name + (S.quiz[t.tid] === "pass" ? " (quiz ✓)" : ""));
     if (!names.length) continue;
     const g = GRADES[c.id];
-    (out[c.area] = out[c.area] || []).push(`- ${c.name} (${c.prog}${g && g !== "Pass" ? ", grade " + g : ""}): ${names.join("; ")}`);
+    const src = c.cert ? `certificate, ${c.cert.provider}` : c.prog + (g && g !== "Pass" ? ", grade " + g : "");
+    (out[c.area] = out[c.area] || []).push(`- ${c.name} (${src}): ${names.join("; ")}`);
   }
-  return AREAS.filter(a => out[a]).map(a => `### ${a}\n${out[a].join("\n")}`).join("\n\n");
+  return AREAS.concat("Other").filter(a => out[a]).map(a => `### ${a}\n${out[a].join("\n")}`).join("\n\n");
 }
 function buildMarkdown() {
   const st = tid => S.status[tid];
   const L = ["# My academic background", "", "Context for an AI assistant, built from my university transcripts and my own self-assessment of each course topic.", "", "## Education"];
   for (const p of ["BSc", "MSc"]) L.push(`- ${PROGRAMS[p]}${GPA[p] ? ` — CGPA ${GPA[p]}/4.00` : ""}`);
+  if (S.certs.length) L.push("", "## Online certificates and courses", ...S.certs.map(x => `- ${x.title} — ${x.provider}${x.year ? ` (${x.year})` : ""}`));
   if (S.about.trim()) L.push("", "## About me", S.about.trim());
   const times = ["focus", "heavy", "moderate", "light"].map(k => {
-    const cs = COURSES.filter(c => !isRemoved(c) && S.time[c.id] === k).map(c => c.name);
+    const cs = ALL.filter(c => !isRemoved(c) && S.time[c.id] === k).map(c => c.name);
     return cs.length ? `- ${TIME_LABEL[k]}: ${cs.join(", ")}` : "";
   }).filter(Boolean);
   if (times.length) L.push("", "## Where I spent my time", ...times);
@@ -775,13 +1160,13 @@ function buildMarkdown() {
   sec("Topics I understand at a basic level", "I was unsure of these or never covered them, but I have reviewed the fundamentals.", t => (st(t.tid) === "unsure" || st(t.tid) === "none") && S.understood[t.tid]);
   sec("Topics I am not sure about", "I saw these in class but my understanding is shaky. Explain them carefully and check my understanding.", t => st(t.tid) === "unsure" && !S.understood[t.tid]);
   sec("Topics I never covered", "Treat these as new to me. Start from the fundamentals.", t => st(t.tid) === "none" && !S.understood[t.tid]);
-  const notes = COURSES.filter(c => !isRemoved(c) && (S.notes[c.id] || "").trim()).map(c => `- ${c.name}: ${S.notes[c.id].trim()}`);
+  const notes = ALL.filter(c => !isRemoved(c) && (S.notes[c.id] || "").trim()).map(c => `- ${c.name}: ${S.notes[c.id].trim()}`);
   if (notes.length) L.push("", "## Course notes", ...notes);
   L.push("", "## How to use this", "- Connect new material to topics I know well (physics, mathematics, numerical methods) when it helps.", "- For topics I am unsure about or never covered, start from intuition, then the math.", "- My degrees were taught in Turkish; I may know some terms in Turkish first.");
   return L.join("\n");
 }
 function buildRag() {
-  const known = COURSES.filter(c => !isRemoved(c)).flatMap(c => topicsOf(c).filter(t => S.status[t.tid] === "known").map(t => t.name));
+  const known = ALL.filter(c => !isRemoved(c)).flatMap(c => topicsOf(c).filter(t => S.status[t.tid] === "known").map(t => t.name));
   return JSON.stringify({
     name: "Learner profile — academic background",
     domain: "Personal background",
@@ -818,6 +1203,24 @@ courses.addEventListener("click", e => {
   else if (act === "restoreTopics") { byId[cid].topics.forEach((_, i) => delete S.hiddenTopics[cid + ":" + i]); }
   else if (act === "allKnown") { topicsOf(byId[cid]).forEach(t => S.status[t.tid] = "known"); }
   else if (act === "remove") { S.removed[cid] = true; open.delete(cid); save(); renderCourses(); refresh(); return; }
+  else if (act === "quiz") { if (qopen.has(tid)) qopen.delete(tid); else qopen.add(tid); rerenderCourse(cid); return; }
+  else if (act === "retry") { delete picked[tid]; rerenderCourse(cid); return; }
+  else if (act === "answer") {
+    const qz = quizOf(tid), o = b.dataset.o;
+    picked[tid] = o;
+    if (o === qz.answer) {
+      S.quiz[tid] = "pass";
+      if (S.status[tid] === "unsure" || S.status[tid] === "none") S.understood[tid] = true;
+    } else if (S.quiz[tid] !== "pass") S.quiz[tid] = "fail";
+  }
+  else if (act === "armDel") { delArm = cid; rerenderCourse(cid); return; }
+  else if (act === "cancelDel") { delArm = null; rerenderCourse(cid); return; }
+  else if (act === "delCert") {
+    S.certs = S.certs.filter(x => x.id !== cid);
+    for (const t of topicsOf(byId[cid])) { delete S.status[t.tid]; delete S.understood[t.tid]; delete S.quiz[t.tid]; }
+    delete S.custom[cid]; delete S.time[cid]; delete S.notes[cid];
+    delArm = null; sync(); save(); renderCourses(); refresh(); return;
+  }
   else return;
   save(); rerenderCourse(cid); refresh();
 });
@@ -832,6 +1235,18 @@ courses.addEventListener("input", e => {
 });
 courses.addEventListener("submit", e => {
   e.preventDefault();
+  if (e.target.id === "certform") {
+    const val = id => document.getElementById(id).value.trim();
+    const title = val("cert-title"), provider = val("cert-provider");
+    if (!title || !provider) return;
+    const id = "cert" + Date.now().toString(36);
+    S.certs.push({ id, title, provider, year: val("cert-year"), area: document.getElementById("cert-area").value });
+    S.custom[id] = val("cert-topics").split(",").map(s => s.trim()).filter(Boolean)
+      .map((name, i) => ({ tid: id + ":c" + i.toString(36) + Date.now().toString(36), name }));
+    open.add(id); sync(); save(); renderCourses(); refresh();
+    const card = document.querySelector(`.course[data-cid="${id}"]`); if (card) card.scrollIntoView({ block: "nearest" });
+    return;
+  }
   const f = e.target, cid = f.dataset.cid, inp = f.querySelector("input"), name = inp.value.trim();
   if (!name) return;
   const list = S.custom[cid] = S.custom[cid] || [];
@@ -887,7 +1302,7 @@ function restore(text) {
   try {
     const data = JSON.parse(text);
     if (!data || typeof data !== "object" || !data.status) throw new Error();
-    S = Object.assign(blank(), data); save();
+    S = Object.assign(blank(), data); sync(); save();
     about.value = S.about; renderCourses(); refresh(); renderOut(); toast("Restored");
   } catch (e) { toast("That is not a Course Map backup. Copy it from the Backup tab."); }
 }
@@ -898,7 +1313,7 @@ document.getElementById("restoreFile").addEventListener("change", e => {
 });
 document.getElementById("resetBtn").addEventListener("click", () => { document.getElementById("resetYes").hidden = false; });
 document.getElementById("resetYes").addEventListener("click", e => {
-  S = blank(); save(); e.target.hidden = true; about.value = ""; renderCourses(); refresh(); renderOut(); toast("Cleared");
+  S = blank(); sync(); save(); e.target.hidden = true; about.value = ""; renderCourses(); refresh(); renderOut(); toast("Cleared");
 });
 
 // Open the first course so the page shows how it works.

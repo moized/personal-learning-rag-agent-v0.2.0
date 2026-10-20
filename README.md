@@ -85,6 +85,8 @@ See:
 
 `tools/course-map/index.html` is a standalone page (no backend, no API key) for marking every topic from my transcripts as *Know it*, *Not sure* or *Not taken*. Unsure or uncovered topics show a short explanation and an "I understand the basics now" checkbox. Redundant courses can be removed, and general-education courses start out removed.
 
+Each topic also has a one-question multiple-choice quiz. Answering it correctly marks an unsure topic as understood and tags it "quiz ✓" in the profile. Online certificates and courses (Coursera, Udemy, etc.) can be added with their own topics, which are marked the same way.
+
 Open the file in a browser. Answers are saved in the browser. The side panel produces:
 
 - a Markdown profile to paste into any AI chat,
