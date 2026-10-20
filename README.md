@@ -89,7 +89,7 @@ Each topic also has a one-question multiple-choice quiz. Answering it correctly 
 
 Open the file in a browser. Answers are saved in the browser. The side panel produces:
 
-- a Markdown profile to paste into any AI chat,
+- a Markdown profile to paste into any AI chat. By default it opens with how the profile was made, the rating scale, which source files (transcripts, certificates) may be attached, and how to read Turkish transcript codes,
 - a JSON source to paste into this agent's manual source box (format `json`),
 - a backup you can restore later.
 

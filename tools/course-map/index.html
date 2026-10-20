@@ -192,6 +192,7 @@ button { cursor: pointer; }
       </div>
       <label class="lbl" for="about">About me (optional)</label>
       <textarea id="about" placeholder="Goals, current job or thesis topic, what you want the AI to help with…"></textarea>
+      <label class="check"><input type="checkbox" id="meta"> Explain how this was made and how to read my attached transcripts and certificates</label>
       <div class="tabs" role="tablist">
         <button role="tab" data-tab="md" aria-selected="true">Profile</button>
         <button role="tab" data-tab="rag" aria-selected="false">RAG agent JSON</button>
@@ -960,7 +961,7 @@ const TIME_LABEL = { "": "Time spent: not set", light: "Light", moderate: "Moder
 
 // ---------- State ----------
 const KEY = "courseMap.v1";
-const blank = () => ({ status: {}, understood: {}, hiddenTopics: {}, removed: {}, custom: {}, time: {}, notes: {}, about: "", quiz: {}, certs: [] });
+const blank = () => ({ status: {}, understood: {}, hiddenTopics: {}, removed: {}, custom: {}, time: {}, notes: {}, about: "", quiz: {}, certs: [], includeMeta: true });
 let S = blank();
 try { const raw = localStorage.getItem(KEY); if (raw) S = Object.assign(blank(), JSON.parse(raw)); } catch (e) {}
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} };
@@ -1160,13 +1161,15 @@ function groupLines(filterFn) {
     if (!names.length) continue;
     const g = GRADES[c.id];
     const src = c.cert ? `certificate, ${c.cert.provider}` : c.prog === "Cert" ? `certificate, ${c.code}` : c.prog + (g && g !== "Pass" ? ", grade " + g : "");
-    (out[c.area] = out[c.area] || []).push(`- ${c.name} (${src}): ${names.join("; ")}`);
+    (out[c.area] = out[c.area] || []).push(`- ${c.name}${c.prog === "Cert" ? "" : ` [${c.code}]`} (${src}): ${names.join("; ")}`);
   }
   return AREAS.concat("Other").filter(a => out[a]).map(a => `### ${a}\n${out[a].join("\n")}`).join("\n\n");
 }
 function buildMarkdown() {
   const st = tid => S.status[tid];
-  const L = ["# My academic background", "", "Context for an AI assistant, built from my university transcripts and my own self-assessment of each course topic.", "", "## Education"];
+  const L = ["# My academic background", "", "Context for an AI assistant, built from my university transcripts and my own self-assessment of each course topic."];
+  if (S.includeMeta) L.push(...metaLines());
+  L.push("", "## Education");
   for (const p of ["BSc", "MSc"]) L.push(`- ${PROGRAMS[p]}${GPA[p] ? ` — CGPA ${GPA[p]}/4.00` : ""}`);
   const certs = ALL.filter(c => c.prog === "Cert" && !isRemoved(c)).map(c => c.cert || { title: c.name, provider: c.code, year: c.year });
   if (certs.length) L.push("", "## Online certificates and courses", ...certs.map(x => `- ${x.title} — ${x.provider}${x.year ? ` (${x.year})` : ""}`));
@@ -1183,8 +1186,45 @@ function buildMarkdown() {
   sec("Topics I never covered", "Treat these as new to me. Start from the fundamentals.", t => st(t.tid) === "none" && !S.understood[t.tid]);
   const notes = ALL.filter(c => !isRemoved(c) && (S.notes[c.id] || "").trim()).map(c => `- ${c.name}: ${S.notes[c.id].trim()}`);
   if (notes.length) L.push("", "## Course notes", ...notes);
+  if (S.includeMeta) {
+    const live = ALL.filter(c => !isRemoved(c));
+    const unassessed = live.filter(c => { const ts = topicsOf(c); return ts.length && ts.every(t => !S.status[t.tid]); }).map(c => c.name);
+    const partial = live.flatMap(topicsOf).filter(t => !S.status[t.tid]).length;
+    const removed = ALL.filter(isRemoved).map(c => c.name);
+    if (unassessed.length || partial) L.push("", "## Not assessed yet", `${partial} topic${partial === 1 ? "" : "s"} have no rating yet, so they are not listed above. Don't assume I know or don't know them.`, ...(unassessed.length ? [`Courses with no topics rated: ${unassessed.join(", ")}.`] : []));
+    if (removed.length) L.push("", "## Left out on purpose", `These transcript courses are not relevant to my technical background, so I removed them from this profile: ${removed.join(", ")}.`);
+  }
   L.push("", "## How to use this", "- Connect new material to topics I know well (physics, mathematics, numerical methods) when it helps.", "- For topics I am unsure about or never covered, start from intuition, then the math.", "- My degrees were taught in Turkish; I may know some terms in Turkish first.");
   return L.join("\n");
+}
+function metaLines() {
+  const today = new Date().toISOString().slice(0, 10);
+  const certs = ALL.filter(c => c.prog === "Cert" && !isRemoved(c)).map(c => c.cert || { title: c.name, provider: c.code, year: c.year });
+  return ["",
+    "## How this profile was made",
+    `- Generated on ${today} with \"Course Map\", a small interactive page I use to rate my own knowledge.`,
+    "- The page lists every course from my official transcripts. For each course it shows a standard set of topics: a typical syllabus for a course with that name, not the exact syllabus my university used. I removed topics my course did not include and added any it was missing.",
+    "- I rated each topic myself:",
+    "  - **Know it**: I could explain it to someone else.",
+    "  - **Not sure**: I studied it, but my understanding is shaky.",
+    "  - **Not taken**: my version of the course did not cover it.",
+    "  - **Basic level**: I was unsure of it or never covered it, then read a short explanation and now understand the basics.",
+    "  - **(quiz ✓)**: I answered one multiple-choice check question on the topic correctly. It is light evidence, not a full test.",
+    "- Grades come from the official transcripts. The ratings describe what I remember now, which can differ from the grade I got years ago.",
+    "",
+    "## Files I may attach with this profile",
+    "- BSc transcript, Istanbul Medeniyet University (Turkish with English translations, 5 pages).",
+    "- MSc transcript, Yıldız Technical University (Turkish with English translations, 2 pages).",
+    ...certs.map(x => `- Certificate: ${x.title}, ${x.provider}${x.year ? ` (${x.year})` : ""}.`),
+    "- If the files are attached, they are the source of truth for course names, codes, dates and grades. This profile adds what the files cannot show: what I actually know today and where I spent my time. Course codes in [brackets] below match the transcripts.",
+    "",
+    "## How to read the Turkish transcripts",
+    "- Grades use a 4.0 scale: AA 4.0, BA 3.5, BB 3.0, CB 2.5, CC 2.0, DC 1.5, DD 1.0, FF fail. YT means passed without a letter grade (used for internships).",
+    "- Z = compulsory course, S = elective. T and U = weekly theory and practice hours. UK = national credits. AKTS = ECTS credits.",
+    "- DNO = term GPA, GNO = cumulative GPA. Courses marked * (internships) do not count toward GPA.",
+    "- YRN = substitute course (taken in place of another in the curriculum). TKR = repeated course. I retook Thermodynamics, Electromagnetic Theory and Internship I; this profile shows the final grade.",
+    "- Course code prefixes: FİZ = physics, MAT = mathematics, KİM = chemistry, MDB = common engineering, IST = statistics, BLM = computer engineering, VBL = data science and big data.",
+    "- The MSc is in its course stage (\"Ders Aşaması\"); the thesis comes after the courses."];
 }
 function buildRag() {
   const known = ALL.filter(c => !isRemoved(c)).flatMap(c => topicsOf(c).filter(t => S.status[t.tid] === "known").map(t => t.name));
@@ -1295,6 +1335,9 @@ document.getElementById("areas").addEventListener("click", e => {
 const about = document.getElementById("about");
 about.value = S.about;
 about.addEventListener("input", () => { S.about = about.value; save(); refresh(); });
+const meta = document.getElementById("meta");
+meta.checked = S.includeMeta;
+meta.addEventListener("change", () => { S.includeMeta = meta.checked; save(); refresh(); });
 document.querySelector(".tabs").addEventListener("click", e => {
   const b = e.target.closest("button[data-tab]"); if (!b) return;
   tab = b.dataset.tab;
