@@ -13,3 +13,8 @@ data/qdrant/*
 web/node_modules/
 web/dist/
 web/.vite/
+
+# SQLite write-ahead files hold recent data too
+data/app.db-*
+# Scratch folders left by test runs
+test-tmp*/
